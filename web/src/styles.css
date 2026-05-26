@@ -679,6 +679,122 @@ select {
   line-height: 1.35;
 }
 
+.cube-matrix-block {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.cube-matrix-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #627176;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cube-matrix-head div {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  color: #20363a;
+}
+
+.cube-matrix-head h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.cube-matrix-wrap {
+  max-height: min(320px, calc(100vh - 360px));
+  overflow: auto;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.cube-matrix {
+  min-width: 620px;
+}
+
+.cube-matrix th:first-child,
+.cube-matrix td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 190px;
+  max-width: 260px;
+  background: inherit;
+  font-weight: 800;
+}
+
+.cube-matrix th:first-child {
+  z-index: 3;
+  background: #f0f4f5;
+}
+
+.cube-matrix th {
+  min-width: 150px;
+}
+
+.cube-matrix th span,
+.cube-matrix th small {
+  display: block;
+}
+
+.cube-matrix th small {
+  margin-top: 3px;
+  color: #627176;
+  font-size: 11px;
+}
+
+.cube-matrix tr.has-missing td {
+  background: #fffaf1;
+}
+
+.cube-matrix tr.has-missing td:first-child {
+  color: #6d4b0c;
+}
+
+.cube-matrix-cell {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 3px 6px;
+  min-width: 112px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #f8fafb;
+  color: #20363a;
+}
+
+.cube-matrix-cell.ready {
+  border-color: #b9dcc8;
+  background: #edf8f1;
+}
+
+.cube-matrix-cell.missing {
+  border-color: #efc99a;
+  background: #fff3df;
+}
+
+.cube-matrix-cell strong {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.cube-matrix-cell small {
+  grid-column: 2;
+  color: #627176;
+  font-size: 11px;
+}
+
 .metric,
 .current-step {
   min-width: 0;

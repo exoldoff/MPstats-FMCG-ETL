@@ -114,6 +114,9 @@ type CatalogFilterOperator = "AND" | "OR";
 type CatalogFilterCondition = { type: CatalogFilterType; value: string };
 type CatalogFilterDraft = { operator: CatalogFilterOperator; conditions: CatalogFilterCondition[] };
 type ExportFilterDraft = { id: string; column: string; match_type: string; value: string };
+type CubeMatrixCell = { status: "ready" | "missing"; period: string; rowsCount: number; title: string };
+type CubeMatrixRow = { categoryKey: string; categoryName: string; cells: CubeMatrixCell[]; missingCount: number };
+type CubeMatrix = { marketplaces: string[]; rows: CubeMatrixRow[]; missingCount: number; totalCells: number; targetPeriods: Record<string, string> };
 
 const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Подкатегория", "Тип", "Вид мяса"];
 
@@ -290,6 +293,76 @@ function monthLabel(year: number, month: number) {
   return `${year}-${String(month).padStart(2, "0")}`;
 }
 
+function cubeMonthLabel(year: number, month: number) {
+  return `${String(month).padStart(2, "0")}.${year}`;
+}
+
+function cubeMonthValue(item: Pick<CubeItem, "year" | "month">) {
+  return item.year * 12 + item.month;
+}
+
+function marketplaceSortKey(marketplace: string) {
+  const order: Record<string, number> = { Ozon: 1, WB: 2, "Яндекс.Маркет": 3, YM: 3 };
+  return order[marketplace] ?? 100;
+}
+
+function buildCubeMatrix(items: CubeItem[]): CubeMatrix {
+  const marketplaces = [...new Set(items.map((item) => item.marketplace))]
+    .sort((left, right) => marketplaceSortKey(left) - marketplaceSortKey(right) || left.localeCompare(right, "ru"));
+  const targets = new Map<string, number>();
+  const latest = new Map<string, CubeItem>();
+  const categories = new Map<string, string>();
+
+  for (const item of items) {
+    const value = cubeMonthValue(item);
+    const target = targets.get(item.marketplace);
+    if (target === undefined || value > target) targets.set(item.marketplace, value);
+
+    const categoryName = item.category_name || item.category_key || "Без категории";
+    const categoryKey = categoryName;
+    categories.set(categoryKey, categoryName);
+    const key = `${categoryKey}\u0000${item.marketplace}`;
+    const previous = latest.get(key);
+    if (!previous || value > cubeMonthValue(previous)) latest.set(key, item);
+  }
+
+  const targetPeriods = Object.fromEntries(
+    marketplaces.map((marketplace) => {
+      const target = targets.get(marketplace) ?? 0;
+      const year = Math.floor((target - 1) / 12);
+      const month = target - year * 12;
+      return [marketplace, target ? cubeMonthLabel(year, month) : "-"];
+    })
+  );
+
+  const rows = [...categories.entries()]
+    .sort((left, right) => left[1].localeCompare(right[1], "ru"))
+    .map(([categoryKey, categoryName]) => {
+      const cells = marketplaces.map((marketplace) => {
+        const item = latest.get(`${categoryKey}\u0000${marketplace}`);
+        const target = targets.get(marketplace);
+        const isReady = Boolean(item && target !== undefined && cubeMonthValue(item) === target);
+        const period = item ? cubeMonthLabel(item.year, item.month) : "нет данных";
+        const expected = targetPeriods[marketplace] ?? "-";
+        return {
+          status: isReady ? "ready" : "missing",
+          period,
+          rowsCount: item?.rows_count ?? 0,
+          title: isReady ? `Актуальный срез: ${period}` : `Не хватает актуального среза ${expected}; последний в кубе: ${period}`
+        } satisfies CubeMatrixCell;
+      });
+      return {
+        categoryKey,
+        categoryName,
+        cells,
+        missingCount: cells.filter((cell) => cell.status === "missing").length
+      } satisfies CubeMatrixRow;
+    });
+
+  const missingCount = rows.reduce((total, row) => total + row.missingCount, 0);
+  return { marketplaces, rows, missingCount, totalCells: rows.length * marketplaces.length, targetPeriods };
+}
+
 function categoryPeriodLabel(category: Category) {
   if (!category.period_from && !category.period_to) return "весь период";
   return `${category.period_from || "с начала"} - ${category.period_to || "без конца"}`;
@@ -306,7 +379,7 @@ function runTypeLabel(type?: string) {
 export function App() {
   const current = monthNow();
   const [mode, setMode] = useState<Mode>("historical_backfill");
-  const [tab, setTab] = useState<Tab>("categories");
+  const [tab, setTab] = useState<Tab>("plan");
   const [projectName, setProjectName] = useState("mpstats");
   const [cookie, setCookie] = useState("");
   const [startYear, setStartYear] = useState(current.year);
@@ -472,6 +545,13 @@ export function App() {
       addLoadError(loadErrors, "История запусков", exc);
     }
 
+    try {
+      const cubeResponse = await api.listCube(loadedProjectName);
+      setCube(cubeResponse.items);
+    } catch (exc) {
+      addLoadError(loadErrors, "Куб", exc);
+    }
+
     setError(loadErrors.length ? loadErrors.join(" | ") : null);
   }
 
@@ -495,6 +575,15 @@ export function App() {
       setCube(cubeResponse.items);
     } catch (exc) {
       setError(`Файлы и куб: ${errorText(exc)}`);
+    }
+  }
+
+  async function refreshCube(targetProjectName = projectName) {
+    try {
+      const cubeResponse = await api.listCube(targetProjectName);
+      setCube(cubeResponse.items);
+    } catch (exc) {
+      setError(`Куб: ${errorText(exc)}`);
     }
   }
 
@@ -668,6 +757,8 @@ export function App() {
       setMessage(`${label}: готово`);
       if (tab === "files" || tab === "cube") {
         await refreshFilesAndCube();
+      } else if (tab === "plan") {
+        await refreshCube();
       }
       if (tab === "cube" && !passiveCubeActions.has(label)) {
         await loadDbPreview();
@@ -951,6 +1042,7 @@ export function App() {
     setSmartPlanFilter("all");
     setTab("plan");
     await refreshRun(created.id, "all");
+    await refreshCube(projectName);
     const runResponse = await api.listRuns(projectName);
     setRuns(runResponse.runs);
   }
@@ -962,6 +1054,7 @@ export function App() {
     setSmartPlanFilter("all");
     setTab("plan");
     await refreshRun(created.id, "all");
+    await refreshCube(projectName);
   }
 
   function saveCurrentWorkflowSettings() {
@@ -1105,9 +1198,9 @@ export function App() {
 
         <section className="center-stage">
           <nav className="tabs">
+            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
             <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => setTab("categories")}>Категории</button>
             <button className={tab === "catalog" ? "active" : ""} title="Редактор CSV-справочника категорий." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>Справочник</button>
-            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
             <button className={tab === "files" ? "active" : ""} onClick={() => { setTab("files"); void refreshFilesAndCube(); }}>Файлы</button>
             <button className={tab === "cube" ? "active" : ""} onClick={() => setTab("cube")}>БД / Куб</button>
             <button className={tab === "export" ? "active" : ""} title="Подготовить XLSX из сохранённого куба." onClick={() => setTab("export")}>Выгрузка</button>
@@ -1179,6 +1272,7 @@ export function App() {
                 hint="Сверяет желаемые задачи с локальными файлами и БД: готово, нет файлов, устарело, ошибка или неполно."
               />
               {smartPlan ? <SmartPlanOverview plan={smartPlan} /> : null}
+              <CubeMatrixTable items={cube} />
               <div className="toolbar wrap">
                 {smartPlanFilters.map((filter) => (
                   <button key={filter.value} className={`chip-button ${smartPlanFilter === filter.value ? "active" : ""}`} onClick={() => setSmartPlanFilter(filter.value)}>
@@ -1597,6 +1691,57 @@ function SmartPlanOverview(props: { plan: SmartPlan }) {
         <strong>{props.plan.recommended_action.label}</strong>
         <p>{props.plan.recommended_action.detail}</p>
       </div>
+    </div>
+  );
+}
+
+function CubeMatrixTable(props: { items: CubeItem[] }) {
+  const matrix = useMemo(() => buildCubeMatrix(props.items), [props.items]);
+  const readyCount = Math.max(0, matrix.totalCells - matrix.missingCount);
+  return (
+    <div className="cube-matrix-block">
+      <div className="cube-matrix-head">
+        <div>
+          <Table2 size={18} />
+          <h3>Матрица куба</h3>
+        </div>
+        <span>{matrix.totalCells ? `${readyCount}/${matrix.totalCells} актуальны` : "нет срезов"}</span>
+      </div>
+      {matrix.rows.length && matrix.marketplaces.length ? (
+        <div className="cube-matrix-wrap">
+          <table className="cube-matrix">
+            <thead>
+              <tr>
+                <th>Категория</th>
+                {matrix.marketplaces.map((marketplace) => (
+                  <th key={marketplace}>
+                    <span>{marketplace}</span>
+                    <small>{matrix.targetPeriods[marketplace]}</small>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {matrix.rows.map((row) => (
+                <tr key={row.categoryKey} className={row.missingCount ? "has-missing" : ""}>
+                  <td title={row.categoryName}>{row.categoryName}</td>
+                  {row.cells.map((cell, index) => (
+                    <td key={`${row.categoryKey}-${matrix.marketplaces[index]}`}>
+                      <span className={`cube-matrix-cell ${cell.status}`} title={cell.title}>
+                        <span aria-hidden="true">{cell.status === "ready" ? "✅" : "❌"}</span>
+                        <strong>{cell.period}</strong>
+                        {cell.rowsCount ? <small>{cell.rowsCount} строк</small> : null}
+                      </span>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Empty text="В кубе пока нет срезов для матрицы." />
+      )}
     </div>
   );
 }
