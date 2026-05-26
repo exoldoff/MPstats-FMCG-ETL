@@ -119,6 +119,20 @@ small,
   font-weight: 700;
 }
 
+.chip-button small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 70%);
+  color: #405157;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .workflow-grid {
   display: grid;
   grid-template-columns: 330px minmax(540px, 1fr) 360px;
@@ -568,6 +582,101 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.smart-plan-overview {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.35fr) minmax(260px, 0.65fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.smart-plan-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.smart-plan-card,
+.recommended-action {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e1e8ea;
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.smart-plan-card span,
+.recommended-action span,
+.recommended-action p {
+  color: #627176;
+}
+
+.smart-plan-card strong {
+  display: block;
+  margin-top: 4px;
+  color: #20363a;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.smart-plan-card.ready {
+  border-color: #b9dcc8;
+  background: #edf8f1;
+}
+
+.smart-plan-card.missing,
+.smart-plan-card.incomplete {
+  border-color: #d5dde0;
+  background: #f4f7f8;
+}
+
+.smart-plan-card.stale {
+  border-color: #f0d399;
+  background: #fff7e6;
+}
+
+.smart-plan-card.failed {
+  border-color: #efc1c1;
+  background: #fff0f0;
+}
+
+.smart-plan-card.db {
+  border-color: #bdd2d5;
+  background: #eef5f4;
+}
+
+.recommended-action {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+}
+
+.recommended-action div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.recommended-action svg {
+  color: #1f6f68;
+}
+
+.recommended-action.retry_failed svg,
+.recommended-action.rebuild_stale svg {
+  color: #8b5d10;
+}
+
+.recommended-action strong {
+  color: #20363a;
+  font-size: 15px;
+}
+
+.recommended-action p {
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .metric,
@@ -1496,14 +1605,83 @@ th {
 
 .task-table th:nth-child(1),
 .task-table td:nth-child(1) {
-  min-width: 150px;
+  min-width: 112px;
+}
+
+.task-table th:nth-child(2),
+.task-table td:nth-child(2) {
+  min-width: 180px;
+}
+
+.task-table th:nth-child(5),
+.task-table td:nth-child(5) {
+  min-width: 250px;
+}
+
+.task-table th:nth-child(7),
+.task-table td:nth-child(7) {
+  min-width: 280px;
+  max-width: 520px;
+  white-space: normal;
 }
 
 .task-table th:nth-child(8),
 .task-table td:nth-child(8) {
-  min-width: 420px;
-  max-width: 720px;
+  min-width: 210px;
+  max-width: 320px;
   white-space: normal;
+}
+
+.file-chain {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.file-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid #d8e1e4;
+  border-radius: 999px;
+  padding: 0 8px;
+  color: #627176;
+  background: #f7fafb;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.file-pill.exists {
+  border-color: #b9dcc8;
+  color: #17633c;
+  background: #e3f3ea;
+}
+
+.file-chain.stale .file-pill.exists {
+  border-color: #f0d399;
+  color: #6d4a11;
+  background: #fff0cf;
+}
+
+.task-action-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-action-cell span {
+  min-width: 0;
+  white-space: normal;
+}
+
+.db-cell {
+  color: #17633c;
+  font-weight: 800;
+}
+
+.muted-cell {
+  color: #627176;
 }
 
 .badge {
@@ -1524,7 +1702,8 @@ th {
 .badge.processed,
 .badge.classified,
 .badge.export,
-.badge.downloaded {
+.badge.downloaded,
+.badge.ready {
   color: #17633c;
   background: #e3f3ea;
 }
@@ -1540,14 +1719,17 @@ th {
 .badge.processing,
 .badge.classifying,
 .badge.saving_to_db,
-.badge.pausing {
+.badge.pausing,
+.badge.stale {
   color: #6d4a11;
   background: #fff0cf;
 }
 
 .badge.paused,
 .badge.no_data,
-.badge.skipped {
+.badge.skipped,
+.badge.missing,
+.badge.incomplete {
   color: #4b5a61;
   background: #e9eef1;
 }
@@ -1747,6 +1929,7 @@ th {
   .editor-layout,
   .export-settings,
   .export-selectors,
+  .smart-plan-overview,
   .quality-toolbar,
   .quality-status-card,
   .external-file-grid,
@@ -1770,5 +1953,9 @@ th {
 
   .mode-switch button {
     flex: 1;
+  }
+
+  .smart-plan-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

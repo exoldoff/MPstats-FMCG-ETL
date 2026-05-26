@@ -9,6 +9,7 @@ from mpstats_app.services.scheduler_service import SchedulerService
 from mpstats_app.services.category_catalog_service import CategoryCatalogService
 from mpstats_app.services.classifier_rules_service import ClassifierRulesService
 from mpstats_app.services.export_service import ExportService
+from mpstats_app.services.smart_plan_service import SmartPlanService
 from mpstats_app.services.smart_pipeline_service import SmartPipelineService
 from mpstats_app.services.workflow_service import WorkflowService
 from pipeline.services.data_quality_service import DataQualityService
@@ -44,6 +45,10 @@ def get_workflow_service(request: Request) -> WorkflowService:
 
 def get_smart_pipeline_service(request: Request) -> SmartPipelineService:
     return request.app.state.smart_pipeline_service
+
+
+def get_smart_plan_service(request: Request) -> SmartPlanService:
+    return request.app.state.smart_plan_service
 
 
 def get_export_service(request: Request) -> ExportService:

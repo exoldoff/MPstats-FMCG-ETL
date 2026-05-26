@@ -36,7 +36,6 @@ import {
   ClassifierCondition,
   ClassifierRule,
   CubeItem,
-  DownloadTask,
   ExportArtifact,
   ExportColumnFilter,
   ExportOptions,
@@ -48,7 +47,10 @@ import {
   ProjectFile,
   QualityProblem,
   QualityProject,
-  QualityReport
+  QualityReport,
+  SmartPlan,
+  SmartPlanStatus,
+  SmartPlanTask
 } from "./api";
 
 type Mode = "historical_backfill" | "monthly_sync";
@@ -66,13 +68,13 @@ const defaultPipelineSettings: PipelineSettings = {
   max_weight_kg: 40
 };
 
-const taskFilters = [
-  ["all", "Все"],
-  ["errors", "Только ошибки"],
-  ["not_downloaded", "Только не скачано"],
-  ["not_processed", "Только не обработано"],
-  ["not_saved", "Только не сохранено в БД"],
-  ["ready", "Только готовые"]
+const smartPlanFilters: Array<{ value: SmartPlanStatus | "all"; label: string }> = [
+  { value: "all", label: "Все" },
+  { value: "ready", label: "Готовые" },
+  { value: "missing", label: "Нет файлов" },
+  { value: "stale", label: "Устарели" },
+  { value: "failed", label: "Ошибки" },
+  { value: "incomplete", label: "Неполные" }
 ];
 
 const matchTypes = [
@@ -136,7 +138,11 @@ const statusLabels: Record<string, string> = {
   pausing: "пауза...",
   paused: "пауза",
   succeeded: "готово",
-  completed_with_errors: "с ошибками"
+  completed_with_errors: "с ошибками",
+  ready: "готово",
+  missing: "нет файлов",
+  stale: "устарело",
+  incomplete: "неполно"
 };
 
 const activeRunStatuses = new Set(["running", "pausing"]);
@@ -324,8 +330,8 @@ export function App() {
   const [externalClassifierResult, setExternalClassifierResult] = useState<ClassificationResponse | null>(null);
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [runs, setRuns] = useState<PipelineRun[]>([]);
-  const [tasks, setTasks] = useState<DownloadTask[]>([]);
-  const [taskFilter, setTaskFilter] = useState("all");
+  const [smartPlan, setSmartPlan] = useState<SmartPlan | null>(null);
+  const [smartPlanFilter, setSmartPlanFilter] = useState<SmartPlanStatus | "all">("all");
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [fileKindFilter, setFileKindFilter] = useState<FileKindFilter>("all");
   const [cube, setCube] = useState<CubeItem[]>([]);
@@ -365,13 +371,13 @@ export function App() {
   useEffect(() => {
     if (!run?.id) return;
     void refreshRun(run.id);
-  }, [taskFilter]);
+  }, [smartPlanFilter]);
 
   useEffect(() => {
     if (!run?.id || !isActiveRunStatus(run.status)) return;
     const id = window.setInterval(() => void refreshRun(run.id), 1500);
     return () => window.clearInterval(id);
-  }, [run?.id, run?.status, taskFilter]);
+  }, [run?.id, run?.status, smartPlanFilter]);
 
   useEffect(() => {
     const previousStatus = previousRunStatusRef.current;
@@ -469,11 +475,11 @@ export function App() {
     setError(loadErrors.length ? loadErrors.join(" | ") : null);
   }
 
-  async function refreshRun(runId: string): Promise<string | null> {
+  async function refreshRun(runId: string, statusFilter: SmartPlanStatus | "all" = smartPlanFilter): Promise<string | null> {
     try {
-      const [freshRun, taskResponse] = await Promise.all([api.getRun(runId), api.listTasks(runId, taskFilter)]);
+      const [freshRun, smartPlanResponse] = await Promise.all([api.getRun(runId), api.getSmartPlan(runId, statusFilter)]);
       setRun(freshRun);
-      setTasks(taskResponse.tasks);
+      setSmartPlan(smartPlanResponse);
       return null;
     } catch (exc) {
       const message = errorText(exc);
@@ -942,8 +948,9 @@ export function App() {
             settings: pipelineSettings
           });
     setRun(created);
+    setSmartPlanFilter("all");
     setTab("plan");
-    await refreshRun(created.id);
+    await refreshRun(created.id, "all");
     const runResponse = await api.listRuns(projectName);
     setRuns(runResponse.runs);
   }
@@ -952,8 +959,9 @@ export function App() {
     await saveCurrentWorkflowSettings();
     const created = await api.monthlySync({ project_name: projectName, settings: pipelineSettings, start_immediately: true, wait: false });
     setRun(created);
+    setSmartPlanFilter("all");
     setTab("plan");
-    await refreshRun(created.id);
+    await refreshRun(created.id, "all");
   }
 
   function saveCurrentWorkflowSettings() {
@@ -1099,7 +1107,7 @@ export function App() {
           <nav className="tabs">
             <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => setTab("categories")}>Категории</button>
             <button className={tab === "catalog" ? "active" : ""} title="Редактор CSV-справочника категорий." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>Справочник</button>
-            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>План загрузки</button>
+            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
             <button className={tab === "files" ? "active" : ""} onClick={() => { setTab("files"); void refreshFilesAndCube(); }}>Файлы</button>
             <button className={tab === "cube" ? "active" : ""} onClick={() => setTab("cube")}>БД / Куб</button>
             <button className={tab === "export" ? "active" : ""} title="Подготовить XLSX из сохранённого куба." onClick={() => setTab("export")}>Выгрузка</button>
@@ -1164,15 +1172,29 @@ export function App() {
 
           {tab === "plan" ? (
             <section className="panel stage-panel">
-              <SectionTitle icon={<Table2 />} title="План загрузки" meta={run ? `${run.total_tasks || tasks.length} задач` : "план не создан"} />
+              <SectionTitle
+                icon={<Table2 />}
+                title="Умный план"
+                meta={smartPlan ? `${smartPlan.summary.total} задач` : run ? `${run.total_tasks} задач` : "план не создан"}
+                hint="Сверяет желаемые задачи с локальными файлами и БД: готово, нет файлов, устарело, ошибка или неполно."
+              />
+              {smartPlan ? <SmartPlanOverview plan={smartPlan} /> : null}
               <div className="toolbar wrap">
-                {taskFilters.map(([value, label]) => (
-                  <button key={value} className={`chip-button ${taskFilter === value ? "active" : ""}`} onClick={() => setTaskFilter(value)}>
-                    {label}
+                {smartPlanFilters.map((filter) => (
+                  <button key={filter.value} className={`chip-button ${smartPlanFilter === filter.value ? "active" : ""}`} onClick={() => setSmartPlanFilter(filter.value)}>
+                    {filter.label}
+                    {smartPlan && filter.value !== "all" ? <small>{smartPlan.summary[filter.value]}</small> : null}
                   </button>
                 ))}
               </div>
-              {tasks.length ? <TaskTable tasks={tasks} onRetry={(taskId) => void runAction("Повтор задачи", () => api.retryTask(taskId), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })} /> : <Empty text="Создай план, и здесь появятся задачи category × marketplace × month." />}
+              {smartPlan?.tasks.length ? (
+                <SmartPlanTable
+                  tasks={smartPlan.tasks}
+                  onRetry={(taskId) => void runAction("Повтор задачи", () => api.retryTask(taskId), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}
+                />
+              ) : (
+                <Empty text={run ? "Нет задач по текущему фильтру умного плана." : "Создай план, и здесь появятся задачи category × marketplace × month."} />
+              )}
             </section>
           ) : null}
 
@@ -1544,57 +1566,116 @@ function FilesTable(props: { files: ProjectFile[] }) {
   );
 }
 
-function TaskTable(props: { tasks: DownloadTask[]; onRetry: (taskId: string) => void }) {
+function SmartPlanOverview(props: { plan: SmartPlan }) {
+  const summary = props.plan.summary;
+  const cards: Array<{ status: SmartPlanStatus; label: string }> = [
+    { status: "ready", label: "Готово" },
+    { status: "missing", label: "Нет файлов" },
+    { status: "stale", label: "Устарели" },
+    { status: "failed", label: "Ошибки" },
+    { status: "incomplete", label: "Неполные" }
+  ];
+  return (
+    <div className="smart-plan-overview">
+      <div className="smart-plan-summary">
+        {cards.map((card) => (
+          <div className={`smart-plan-card ${card.status}`} key={card.status}>
+            <span>{card.label}</span>
+            <strong>{summary[card.status]}</strong>
+          </div>
+        ))}
+        <div className="smart-plan-card db">
+          <span>В БД</span>
+          <strong>{summary.saved_to_db}</strong>
+        </div>
+      </div>
+      <div className={`recommended-action ${props.plan.recommended_action.key}`}>
+        <div>
+          {summary.failed || summary.stale ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+          <span>Рекомендованное действие</span>
+        </div>
+        <strong>{props.plan.recommended_action.label}</strong>
+        <p>{props.plan.recommended_action.detail}</p>
+      </div>
+    </div>
+  );
+}
+
+function SmartPlanTable(props: { tasks: SmartPlanTask[]; onRetry: (taskId: string) => void }) {
   return (
     <FilterableTable
       className="task-table"
       rows={props.tasks}
-      rowKey={(task) => task.id}
+      rowKey={(task) => task.task_id}
       emptyText="Нет задач по текущим фильтрам."
       columns={[
+        {
+          id: "smart_status",
+          label: "Статус",
+          value: (task) => statusLabels[task.smart_status] ?? task.smart_status,
+          render: (task) => <Badge value={task.smart_status} />
+        },
         { id: "category", label: "Категория", value: (task) => task.category_name, title: (task) => task.category_path },
         { id: "marketplace", label: "Marketplace", value: (task) => task.marketplace },
         { id: "month", label: "Месяц", value: (task) => monthLabel(task.year, task.month) },
         {
-          id: "download",
-          label: "Скачивание",
-          value: (task) => statusLabels[task.download_status] ?? task.download_status,
-          render: (task) => <Badge value={task.download_status} />
+          id: "files",
+          label: "Файлы",
+          value: (task) => [task.raw_file.exists ? "raw" : "", task.processed_file.exists ? "processed" : "", task.classified_file.exists ? "classified" : ""].filter(Boolean).join(" "),
+          render: (task) => <SmartPlanFileChain task={task} />
         },
         {
-          id: "process",
-          label: "Обработка",
-          value: (task) => statusLabels[task.process_status] ?? task.process_status,
-          render: (task) => <Badge value={task.process_status} />
-        },
-        {
-          id: "classify",
-          label: "Классиф.",
-          value: (task) => statusLabels[task.classify_status] ?? task.classify_status,
-          render: (task) => <Badge value={task.classify_status} />
-        },
-        {
-          id: "save",
+          id: "db",
           label: "БД",
-          value: (task) => statusLabels[task.save_status] ?? task.save_status,
-          render: (task) => <Badge value={task.save_status} />
+          value: (task) => task.has_cube ? "в БД" : "нет",
+          render: (task) => task.has_cube ? <span className="db-cell">{task.cube_rows_count} строк</span> : <span className="muted-cell">нет</span>,
+          numeric: true
         },
         {
-          id: "error",
-          label: "Ошибка",
-          value: (task) => task.error_message ?? "-",
-          render: (task) => task.error_message ? <span className="error-text"><AlertTriangle size={14} />{task.error_message}</span> : "-"
+          id: "reason",
+          label: "Причина",
+          value: (task) => task.reason,
+          title: (task) => task.reason
         },
         {
           id: "action",
-          label: "",
-          value: () => "",
-          render: (task) => <button className="tiny-button" onClick={() => props.onRetry(task.id)}>повтор</button>,
-          filterable: false,
-          sortable: false
+          label: "Действие",
+          value: (task) => task.recommended_action,
+          render: (task) => (
+            <div className="task-action-cell">
+              <span>{task.recommended_action}</span>
+              {task.smart_status === "failed" ? <button className="tiny-button" onClick={() => props.onRetry(task.task_id)}>повтор</button> : null}
+            </div>
+          )
+        },
+        {
+          id: "pipeline_status",
+          label: "Pipeline",
+          value: (task) => statusLabels[task.pipeline_status] ?? task.pipeline_status,
+          render: (task) => <Badge value={task.pipeline_status} />
         }
       ]}
     />
+  );
+}
+
+function SmartPlanFileChain(props: { task: SmartPlanTask }) {
+  return (
+    <div className={`file-chain ${props.task.smart_status}`}>
+      <SmartPlanFilePill label="raw" file={props.task.raw_file} />
+      <SmartPlanFilePill label="processed" file={props.task.processed_file} />
+      <SmartPlanFilePill label="classified" file={props.task.classified_file} />
+    </div>
+  );
+}
+
+function SmartPlanFilePill(props: { label: string; file: SmartPlanTask["raw_file"] }) {
+  const exists = props.file.exists && props.file.size > 0;
+  const title = props.file.path ? `${props.file.path}${props.file.updated_at ? `, ${new Date(props.file.updated_at).toLocaleString("ru-RU")}` : ""}` : "Файл не задан";
+  return (
+    <span className={`file-pill ${exists ? "exists" : "missing"}`} title={title}>
+      {props.label}
+    </span>
   );
 }
 
@@ -2456,7 +2537,7 @@ function ProductInstructionModal(props: { onClose: () => void }) {
           </section>
           <section className="instruction-section">
             <h3>3. Загрузка</h3>
-            <p>Для старых периодов выбери «Историческая загрузка», отметь категории и нажми «Создать план». Потом проверь вкладку «План загрузки» и нажми «Запустить». Для следующего месяца используй режим «Ежемесячное обновление» и кнопку синхронизации.</p>
+            <p>Для старых периодов выбери «Историческая загрузка», отметь категории и нажми «Создать план». Потом проверь вкладку «Умный план» и нажми «Запустить». Для следующего месяца используй режим «Ежемесячное обновление» и кнопку синхронизации.</p>
           </section>
           <section className="instruction-section">
             <h3>4. БД / Куб</h3>

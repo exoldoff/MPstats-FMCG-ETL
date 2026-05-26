@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -622,6 +623,74 @@ class WebApiTest(unittest.TestCase):
                 )
                 self.assertEqual(saved.status_code, 200)
                 self.assertEqual(saved.json()["rows"], 1)
+
+    def test_smart_plan_compares_expected_tasks_with_local_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+
+            with TestClient(app) as client:
+                categories = client.get("/api/workflow/categories").json()["categories"]
+                category_ids = [
+                    row["category_id"]
+                    for row in categories
+                    if row["category_name"] in {"Лимонная кислота", "Масло"}
+                ]
+                plan_response = client.post(
+                    "/api/workflow/pipeline/plans",
+                    json={
+                        "project_name": "smart-plan-unit",
+                        "run_type": "historical_backfill",
+                        "category_ids": category_ids,
+                        "start_year": 2025,
+                        "start_month": 1,
+                        "end_year": 2025,
+                        "end_month": 2,
+                        "settings": {
+                            "overwrite_raw": False,
+                            "overwrite_processed": False,
+                            "overwrite_db": False,
+                            "max_parallel_downloads": 1,
+                            "retry_count": 0,
+                            "timeout_seconds": 300,
+                            "pause_between_requests": 0,
+                            "max_weight_kg": 40,
+                        },
+                    },
+                )
+                self.assertEqual(plan_response.status_code, 200)
+                run_id = plan_response.json()["id"]
+                tasks = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"]
+                self.assertEqual(len(tasks), 6)
+
+                write_semicolon_csv(pd.DataFrame([{"SKU": "raw-only"}]), Path(tasks[1]["raw_file_path"]))
+                write_semicolon_csv(pd.DataFrame([{"SKU": "ready"}]), Path(tasks[2]["processed_file_path"]))
+                write_semicolon_csv(pd.DataFrame([{"SKU": "ready"}]), Path(tasks[2]["classified_file_path"]))
+                write_semicolon_csv(pd.DataFrame([{"SKU": "old-processed"}]), Path(tasks[3]["processed_file_path"]))
+                write_semicolon_csv(pd.DataFrame([{"SKU": "new-raw"}]), Path(tasks[3]["raw_file_path"]))
+                old_time = 1_700_000_000
+                new_time = old_time + 100
+                os.utime(tasks[3]["processed_file_path"], (old_time, old_time))
+                os.utime(tasks[3]["raw_file_path"], (new_time, new_time))
+                app.state.repository.update_download_task(tasks[4]["id"], {"status": "failed", "error_message": "unit failure"})
+
+                smart_plan = client.get(f"/api/workflow/pipeline/runs/{run_id}/smart-plan")
+                self.assertEqual(smart_plan.status_code, 200)
+                summary = smart_plan.json()["summary"]
+                self.assertEqual(summary["total"], 6)
+                self.assertEqual(summary["missing"], 2)
+                self.assertEqual(summary["incomplete"], 1)
+                self.assertEqual(summary["ready"], 1)
+                self.assertEqual(summary["stale"], 1)
+                self.assertEqual(summary["failed"], 1)
+                self.assertEqual(smart_plan.json()["recommended_action"]["key"], "retry_failed")
+
+                ready_only = client.get(f"/api/workflow/pipeline/runs/{run_id}/smart-plan", params={"status": "ready"})
+                self.assertEqual(ready_only.status_code, 200)
+                self.assertEqual(len(ready_only.json()["tasks"]), 1)
+                self.assertEqual(ready_only.json()["tasks"][0]["recommended_action"], "Собрать куб из готовых файлов")
 
     def test_smart_pipeline_plan_rebuild_dedup_retry_and_monthly_sync(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -25,6 +25,7 @@ from mpstats_app.services.classifier_rules_service import ClassifierRulesService
 from mpstats_app.services.export_service import ExportService
 from mpstats_app.services.job_service import JobService
 from mpstats_app.services.scheduler_service import SchedulerService
+from mpstats_app.services.smart_plan_service import SmartPlanService
 from mpstats_app.services.smart_pipeline_service import SmartPipelineService
 from mpstats_app.services.workflow_service import WorkflowService
 from pipeline.repositories.data_quality_repository import DataQualityRepository
@@ -38,6 +39,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     classifier_rules_service = ClassifierRulesService(settings=app_settings)
     workflow_service = WorkflowService(settings=app_settings, repository=repository, catalog_service=catalog_service)
     smart_pipeline_service = SmartPipelineService(settings=app_settings, repository=repository, catalog_service=catalog_service)
+    smart_plan_service = SmartPlanService(settings=app_settings, repository=repository)
     export_service = ExportService(settings=app_settings, repository=repository)
     job_service = JobService(settings=app_settings, repository=repository)
     scheduler_service = SchedulerService(settings=app_settings, repository=repository, job_service=job_service)
@@ -63,6 +65,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     app.state.classifier_rules_service = classifier_rules_service
     app.state.workflow_service = workflow_service
     app.state.smart_pipeline_service = smart_pipeline_service
+    app.state.smart_plan_service = smart_plan_service
     app.state.export_service = export_service
     app.state.job_service = job_service
     app.state.scheduler_service = scheduler_service

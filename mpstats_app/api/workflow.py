@@ -3,7 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from mpstats_app.api.dependencies import get_catalog_service, get_smart_pipeline_service, get_workflow_service
+from mpstats_app.api.dependencies import (
+    get_catalog_service,
+    get_smart_pipeline_service,
+    get_smart_plan_service,
+    get_workflow_service,
+)
 from mpstats_app.schemas import (
     AppSettingsPayload,
     CategorySourcePayload,
@@ -18,6 +23,7 @@ from mpstats_app.schemas import (
     SaveToDbPayload,
 )
 from mpstats_app.services.category_catalog_service import CategoryCatalogService
+from mpstats_app.services.smart_plan_service import SmartPlanService
 from mpstats_app.services.smart_pipeline_service import SmartPipelineService
 from mpstats_app.services.workflow_service import WorkflowService
 
@@ -223,6 +229,15 @@ def list_pipeline_tasks(
     pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
 ) -> dict[str, object]:
     return _handle(lambda: pipeline.list_tasks(run_id=run_id, task_filter=task_filter))
+
+
+@router.get("/pipeline/runs/{run_id}/smart-plan")
+def get_smart_plan(
+    run_id: str,
+    status: str = "all",
+    smart_plan: SmartPlanService = Depends(get_smart_plan_service),
+) -> dict[str, object]:
+    return _handle(lambda: smart_plan.get_run_plan(run_id=run_id, status=status))
 
 
 @router.post("/pipeline/runs/{run_id}/start")

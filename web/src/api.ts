@@ -108,6 +108,65 @@ export type DownloadTask = {
   error_message?: string | null;
 };
 
+export type SmartPlanStatus = "ready" | "missing" | "stale" | "failed" | "incomplete";
+
+export type SmartPlanFile = {
+  path?: string | null;
+  exists: boolean;
+  size: number;
+  updated_at?: string | null;
+};
+
+export type SmartPlanTask = {
+  task_id: string;
+  run_id: string;
+  project_name: string;
+  marketplace: string;
+  marketplace_code: string;
+  category_name: string;
+  category_path: string;
+  category_id: string;
+  category_key: string;
+  year: number;
+  month: number;
+  pipeline_status: string;
+  download_status: string;
+  process_status: string;
+  classify_status: string;
+  save_status: string;
+  rows_count: number;
+  error_message?: string | null;
+  smart_status: SmartPlanStatus;
+  reason: string;
+  recommended_action: string;
+  has_cube: boolean;
+  cube_rows_count: number;
+  cube_saved_at?: string | null;
+  raw_file: SmartPlanFile;
+  processed_file: SmartPlanFile;
+  classified_file: SmartPlanFile;
+};
+
+export type SmartPlanSummary = Record<SmartPlanStatus, number> & {
+  total: number;
+  saved_to_db: number;
+  ready_for_db: number;
+};
+
+export type SmartPlanAction = {
+  key: string;
+  label: string;
+  detail: string;
+};
+
+export type SmartPlan = {
+  run_id: string;
+  generated_at: string;
+  summary: SmartPlanSummary;
+  recommended_action: SmartPlanAction;
+  tasks: SmartPlanTask[];
+};
+
 export type ProjectFile = {
   path: string;
   relative_path?: string;
@@ -376,6 +435,8 @@ export const api = {
     request<PipelineRun>("/api/workflow/pipeline/monthly-sync", { method: "POST", body: JSON.stringify(payload) }),
   listRuns: (projectName: string) => request<{ runs: PipelineRun[] }>(`/api/workflow/pipeline/runs?project_name=${encodeURIComponent(projectName)}`),
   getRun: (runId: string) => request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}`),
+  getSmartPlan: (runId: string, status = "all") =>
+    request<SmartPlan>(`/api/workflow/pipeline/runs/${runId}/smart-plan?status=${encodeURIComponent(status)}`),
   listTasks: (runId: string, taskFilter: string) =>
     request<{ tasks: DownloadTask[] }>(`/api/workflow/pipeline/runs/${runId}/tasks?task_filter=${encodeURIComponent(taskFilter)}`),
   startRun: (runId: string, wait = false) =>
