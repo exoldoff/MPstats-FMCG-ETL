@@ -1,0 +1,48 @@
+﻿active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json
+0;10;Мыло;Подкатегория;Название;contains;жидкое;Жидкое мыло;overwrite;Базовая классификация мыла;
+0;20;Мыло;Тип;Название;contains;хозяйственное;Хозяйственное;overwrite;Тип мыла;
+0;30;Спред;Тип;Название;contains;вега;Вега-спред;overwrite;Тип спреда;
+0;40;*;Бренд;SKU;equals;123456789;ПримерБренд;fill_empty;Пример дозаполнения бренда по SKU для всех категорий;
+1;41;Мыло хозяйственное;Подкатегория;Категория;contains;хозяйств;Хозяйственное;fill_empty;Хоз.мыло определяет по категории;
+1;50;Мыло;Подкатегория;Название;contains;жидк;Жидкое;fill_empty;Жидкое определяем;"[{""join_with_prev"": ""and"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""жидк""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""крем""}]"
+1;60;Мыло;Подкатегория;Название;contains;тверд;Твердое;fill_empty;Твердое определяем;"[{""join_with_prev"": ""and"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""тверд""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""твёрд""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""туалетн""}]"
+1;42;Мыло;Подкатегория;Название;contains;хозяйств;Хозяйственное;fill_empty;Хоз.мыло опеределяет по названию;
+1;43;Мыло хозяйственное;Категория;Категория;equals;Мыло хозяйственное;Мыло;overwrite;Перезаписывает хозяйственное мыло как мыло;
+1;70;Мясо;Вид мяса;Название;regex;(?:свинина\s*[-/]\s*говядина|говядина\s*[-/]\s*свинина|из\s+свинин\w*\s+и\s+говядин\w*|из\s+говядин\w*\s+и\s+свинин\w*|говядин\w*\s+и\s+свинин\w*|свинин\w*\s+и\s+говядин\w*|свино\s*[-/ ]?\s*говяж\w*|говяж\w*\s*[-/ ]?\s*свин\w*|свиноговяж\w*);свинина-говядина;overwrite;Мясо: смесь свинина+говядина (узкий паттерн, выше одиночных видов);
+1;75;Мясо;Вид мяса;Название;regex;^(?=.*(?:свинин\w*|свин\w*))(?!.*(?:говядин\w*|говяж\w*)).*$;свинина;overwrite;Мясо: свинина без явной смеси с говядиной;
+1;80;Мясо;Вид мяса;Название;regex;^(?=.*(?:говядин\w*|говяж\w*))(?!.*свин\w*).*$;говядина;overwrite;Мясо: говядина без явной смеси со свининой;
+1;85;Мясо;Вид мяса;Название;regex;(?i)(?:баран|ягнён|ягнен|ягнят|бараш);баранина;overwrite;Мясо: баранина/ягнёнок (объединено);
+1;90;Мясо;Вид мяса;Название;regex;(?i)(?<![a-zа-яё])(?:курин|кур(?!орт|ьер|ск|кум)|грудк|цыпл|индей|индю|утк|утин|утенок|гус|перепел|петелин);птица;overwrite;Мясо: птица (по типичным маркерам в названиях);
+1;95;Мясо;Подкатегория;Название;contains;печен;Печень;overwrite;Субпродукт Печень;
+1;100;Мясо;Подкатегория;Название;contains;сердц;Сердце;overwrite;Субпродукт Сердце;
+1;105;Мясо;Подкатегория;Название;contains;желуд;Желудки;overwrite;Субпродукт Желудки;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""пупк""}]"
+1;110;Мясо;Подкатегория;Название;contains;голень;Голень;overwrite;Часть Голень;
+1;115;Мясо;Подкатегория;Название;contains;бедро;Бедро;overwrite;Часть Бедро;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""бедрыш""}]"
+1;120;Мясо;Подкатегория;Название;contains;бедра;Окорок/бедро;overwrite;Часть Окорок;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""четверт""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""окорок""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""бедро""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""бедра""}]"
+1;125;Мясо;Подкатегория;Название;contains;крыл;Крылья;overwrite;Часть Крылья;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""крылыш""}]"
+1;130;Мясо;Подкатегория;Название;contains;ребра;Ребра;overwrite;Часть Ребра;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""рёбра""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""ребр""}]"
+1;135;Мясо;Подкатегория;Название;contains;шейка;Шейка;overwrite;Часть Шейка;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""шея""}]"
+1;140;Мясо;Подкатегория;Название;contains;карбонад;Карбонад;overwrite;Часть Карбонад;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""карбонат""}]"
+1;145;Мясо;Подкатегория;Название;contains;грудк;Филе/грудка;overwrite;Часть Филе/грудка;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""филе""}]"
+1;150;Мясо;Подкатегория;Название;contains;бефстроганов;Бефстроганов;overwrite;Формат Бефстроганов;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""строганов""}]"
+1;155;Мясо;Подкатегория;Название;contains;фарш;Фарш;overwrite;Формат Фарш;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""startswith"", ""pattern"": ""Фарш""}]"
+1;160;Мясо;Подкатегория;Название;contains;котлет;Котлеты/биточки;overwrite;Формат Котлеты/биточки;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""биточ""}]"
+1;165;Мясо;Подкатегория;Название;contains;тефтел;Тефтели;overwrite;Формат Тефтели;
+1;170;Мясо;Подкатегория;Название;contains;фрикадел;Фрикадельки;overwrite;Формат Фрикадельки;
+1;175;Мясо;Подкатегория;Название;contains;наггет;Наггетсы/стрипсы;overwrite;Формат Наггетсы/стрипсы;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""стрипс""}]"
+1;180;Мясо;Подкатегория;Название;contains;шницел;Шницель/отбивные;overwrite;Формат Шницель/отбивные;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""эскалоп""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""отбивн""}]"
+1;185;Мясо;Подкатегория;Название;contains;купат;Купаты/колбаски;overwrite;Формат Купаты/колбаски;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""колбаск""}]"
+1;190;Мясо;Подкатегория;Название;contains;люля;Люля-кебаб;overwrite;Формат Люля-кебаб;
+1;195;Мясо;Подкатегория;Название;contains;кордон;Котлеты с начинкой;overwrite;Формат Котлеты с начинкой;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""киевск""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""зраз""}]"
+1;200;Мясо;Подкатегория;Название;contains;шашлык;Шашлык/в маринаде;overwrite;Формат Шашлык/в маринаде;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""маринад""}]"
+1;205;Мясо;Подкатегория;Название;contains;бургер;Бургер;overwrite;Формат Бургер;
+1;210;Мясо;Подкатегория;Название;contains;стейк;Стейк;overwrite;Стейк;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""стеик""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""рибай""}]"
+1;215;Мясо;Подкатегория;Название;contains;рагу;Рагу/поджарка;overwrite;Формат рагу поджарка;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""поджарка""}]"
+1;220;Мясо;Подкатегория;Название;contains;Лопатка;Лопатка;overwrite;Часть Лопатка;
+1;225;Мясо;Подкатегория;Название;contains;Тушка;Тушка;overwrite;Формат Тушка;
+1;230;Мясо;Подкатегория;Название;contains;Вырезка;Вырезка;overwrite;Формат Вырезка;
+1;97;Мясо;Вид мяса;Название;contains;Ц/Б;птица;overwrite;Птица цб;
+1;98;Мясо;Вид мяса;Название;contains;фарш;свинина-говядина;overwrite;Свинина говядина фарш;"[{""join_with_prev"": ""and"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""домашний""}]"
+1;240;Сахар;Подкатегория;Название;contains;белый;Белый;overwrite;;
+1;250;Сахар;Подкатегория;Название;contains;тростник;Тростниковый;overwrite;;
+1;260;Сахар;Тип;Название;contains;кусковой;Рафинад/кусковой;overwrite;;"[{""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""кусок""}, {""join_with_prev"": ""or"", ""match_field"": ""Название"", ""match_type"": ""contains"", ""pattern"": ""рафинад""}]"

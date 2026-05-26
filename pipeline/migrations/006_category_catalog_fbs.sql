@@ -1,0 +1,1 @@
+ALTER TABLE app_category_catalog ADD COLUMN IF NOT EXISTS fbs BOOLEAN;

@@ -1,0 +1,63 @@
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id VARCHAR PRIMARY KEY,
+    project_name VARCHAR NOT NULL,
+    run_type VARCHAR NOT NULL,
+    period_from VARCHAR,
+    period_to VARCHAR,
+    status VARCHAR NOT NULL DEFAULT 'planned',
+    total_tasks INTEGER DEFAULT 0,
+    completed_tasks INTEGER DEFAULT 0,
+    failed_tasks INTEGER DEFAULT 0,
+    current_step VARCHAR,
+    selected_category_ids_json VARCHAR,
+    settings_json VARCHAR,
+    pause_requested BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT current_timestamp,
+    updated_at TIMESTAMP DEFAULT current_timestamp,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS download_tasks (
+    id VARCHAR PRIMARY KEY,
+    run_id VARCHAR NOT NULL,
+    project_name VARCHAR NOT NULL,
+    marketplace VARCHAR NOT NULL,
+    marketplace_code VARCHAR NOT NULL,
+    category_name VARCHAR NOT NULL,
+    category_path VARCHAR NOT NULL,
+    category_id VARCHAR NOT NULL,
+    category_key VARCHAR NOT NULL,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    download_status VARCHAR NOT NULL DEFAULT 'pending',
+    process_status VARCHAR NOT NULL DEFAULT 'pending',
+    classify_status VARCHAR NOT NULL DEFAULT 'pending',
+    save_status VARCHAR NOT NULL DEFAULT 'pending',
+    raw_file_path VARCHAR,
+    processed_file_path VARCHAR,
+    classified_file_path VARCHAR,
+    rows_count INTEGER DEFAULT 0,
+    error_message VARCHAR,
+    task_hash VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT current_timestamp,
+    updated_at TIMESTAMP DEFAULT current_timestamp,
+    UNIQUE(project_name, marketplace_code, category_key, year, month)
+);
+
+CREATE TABLE IF NOT EXISTS cube_registry (
+    id VARCHAR PRIMARY KEY,
+    project_name VARCHAR NOT NULL,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    marketplace VARCHAR NOT NULL,
+    marketplace_code VARCHAR NOT NULL,
+    category_key VARCHAR NOT NULL,
+    category_name VARCHAR NOT NULL,
+    rows_count INTEGER DEFAULT 0,
+    saved_to_db_at TIMESTAMP DEFAULT current_timestamp,
+    source_processed_file_path VARCHAR,
+    file_hash VARCHAR,
+    UNIQUE(project_name, year, month, marketplace_code, category_key)
+);

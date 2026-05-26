@@ -1,0 +1,49 @@
+# Кэш Python
+__pycache__/
+*.pyc
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Системное
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Локальные данные
+data/
+output/
+temp/
+mpstats.duckdb
+*.duckdb
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+
+# Переменные окружения
+.env
+
+#пайплайн
+pipeline/logs/
+pipeline/01_step1_raw/
+pipeline/02_step2_enriched/
+pipeline/03_step3_standardized/
+pipeline/04_step4_parsed/
+pipeline/*.xlsx
+Архив выгрузок/
+01_step1_raw/
+02_step2_enriched/
+03_step3_standardized/
+04_step4_parsed/
+
+# Excel-дубликаты справочников не являются источником правды
+*.xlsx

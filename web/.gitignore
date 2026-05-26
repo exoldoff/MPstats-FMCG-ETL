@@ -1,0 +1,5 @@
+node_modules/
+
+# Keep the prebuilt frontend in git so Windows users can run without Node.js.
+!dist/
+!dist/**
