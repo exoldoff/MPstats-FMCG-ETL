@@ -35,6 +35,7 @@
 - Синтаксис фильтров MPStats: `filter.md`.
 - Архив задач: `справочник tasks архив.md`.
 - Handbook для обновления `TASKS`: `.cursor/agents/mpstats-tasks-handbook.md`.
+- Шаблон настроек выгрузки: `pipeline/step1_export_config.example.json`; локальный `pipeline/step1_export_config.json` игнорируется, потому что в нём может быть cookie.
 - Правила классификации: `classifiers/rules.csv`; основной редактор теперь вкладка `Классификатор` в локальной web-app.
 - Локальное приложение: `mpstats_app/` + `web/`; справочник и правила редактируются через web UI и сохраняются обратно в CSV.
 

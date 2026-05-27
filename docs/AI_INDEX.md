@@ -30,7 +30,7 @@
 | Notebook UI | `MPstats_export_yearmonnth_v1.3_pipeline.ipynb` | Основной удобный интерфейс пользователя |
 | CLI | `pipeline/cli.py`, `pipeline/services/run_service.py` | Автоматизированный запуск без Jupyter |
 | Документация | `README.md`, `docs/USER_GUIDE.md` | Общий вход и пользовательские сценарии |
-| Настройки выгрузки | `pipeline/step1_export_config.json`, `pipeline/step1_config.py`, `pipeline/step1_gui.py` | Периоды, cookie, TASKS, GUI шага 1 |
+| Настройки выгрузки | `pipeline/step1_export_config.example.json`, локальный `pipeline/step1_export_config.json`, `pipeline/step1_config.py`, `pipeline/step1_gui.py` | Периоды, cookie, TASKS, GUI шага 1 |
 | Категории | `Справочник категорий MP STATS.csv`, `filter.md`, `.cursor/agents/mpstats-tasks-handbook.md`, `справочник tasks архив.md` | Добавление или синхронизация TASKS |
 | Классификация | `classifiers/rules.csv`, `classifiers/engine.py`, `classifiers/gui.py`, `mpstats_app/services/classifier_rules_service.py` | Правила, GUI и движок классификатора |
 | Локальная web-app | `mpstats_app/`, `web/`, `docs/USER_GUIDE.md` | Smart pipeline, manifest, CRUD справочника и классификатора |
@@ -72,6 +72,7 @@ python3 -m pip install -r requirements.txt
 GUI настроек выгрузки:
 
 ```bash
+test -f pipeline/step1_export_config.json || cp pipeline/step1_export_config.example.json pipeline/step1_export_config.json
 python3 -m pipeline.step1_gui --config "pipeline/step1_export_config.json" --archive "справочник tasks архив.md"
 ```
 

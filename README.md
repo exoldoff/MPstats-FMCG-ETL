@@ -57,7 +57,8 @@ MPStats даёт выгрузки, но корпформат не спешит:
 ## Основные файлы
 
 - `MPstats_export_yearmonnth_v1.3_pipeline.ipynb` — главный пайплайн.
-- `pipeline/step1_export_config.json` — настройки выгрузки: период, cookie, задачи.
+- `pipeline/step1_export_config.example.json` — безопасный шаблон настроек выгрузки.
+- `pipeline/step1_export_config.json` — локальный игнорируемый конфиг с периодом, cookie и задачами.
 - `pipeline/step1_gui.py` — GUI для редактирования настроек выгрузки.
 - `pipeline/step1_config.py` — загрузка, нормализация и сохранение настроек шага 1.
 - `classifiers/rules.csv` — таблица правил классификации.
@@ -84,7 +85,7 @@ MPStats даёт выгрузки, но корпформат не спешит:
 - Автоматического CI, который запускает тесты и проверки перед merge.
 - Frontend/e2e-проверок web UI в браузере.
 - Регулярного отчёта качества данных: аномальные веса, пустые классификации, причины отбрасывания строк.
-- Полной уборки исторических выгрузок, логов и локальных DB-артефактов из tracked-части репозитория.
+- CI/pre-push-проверок, которые автоматически ловят случайно добавленные секреты и рабочие данные.
 - Отдельной API-reference для web backend; сейчас источники правды — routes/schemas и `tests/test_web_api.py`.
 
 ## Быстрый старт
@@ -92,8 +93,11 @@ MPStats даёт выгрузки, но корпформат не спешит:
 Открыть GUI настроек выгрузки:
 
 ```bash
+test -f pipeline/step1_export_config.json || cp pipeline/step1_export_config.example.json pipeline/step1_export_config.json
 python3 -m pipeline.step1_gui --config "pipeline/step1_export_config.json" --archive "справочник tasks архив.md"
 ```
+
+`pipeline/step1_export_config.json` не коммитится: в нём может храниться ваш MPStats cookie. Если файла ещё нет, GUI создаст его при первом сохранении, либо команда выше скопирует шаблон без перезаписи уже существующего конфига.
 
 Открыть GUI правил классификации:
 
@@ -145,6 +149,8 @@ python3 -m pipeline.cli export --config pipeline/step1_export_config.json
 ```
 
 Для обычной работы открой `MPstats_export_yearmonnth_v1.3_pipeline.ipynb`, поменяй параметры в блоке `0. Настройки и импорты` и запускай нужные шаги сверху вниз. Для шага 1 в конфиге должен быть актуальный cookie.
+
+Для публикации в GitHub пушьте только текущую чистую ветку `main`; старые локальные ветки могут содержать историю рабочих выгрузок.
 
 ## Рабочие директории
 

@@ -31,8 +31,12 @@ mpstats.duckdb
 
 # Переменные окружения
 .env
+.env.*
+!.env.example
 
 #пайплайн
+pipeline/step1_export_config.json
+pipeline/step1_export_config.local.json
 pipeline/logs/
 pipeline/01_step1_raw/
 pipeline/02_step2_enriched/
