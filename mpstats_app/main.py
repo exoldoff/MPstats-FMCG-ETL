@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from mpstats_app.api.exports import router as exports_router
 from mpstats_app.api.health import router as health_router
 from mpstats_app.api.products import router as products_router
+from mpstats_app.api.projects import router as projects_router
 from mpstats_app.api.quality import router as quality_router
 from mpstats_app.api.runs import router as runs_router
 from mpstats_app.api.schedules import router as schedules_router
@@ -24,6 +25,7 @@ from mpstats_app.services.category_catalog_service import CategoryCatalogService
 from mpstats_app.services.classifier_rules_service import ClassifierRulesService
 from mpstats_app.services.export_service import ExportService
 from mpstats_app.services.job_service import JobService
+from mpstats_app.services.project_service import ProjectService
 from mpstats_app.services.scheduler_service import SchedulerService
 from mpstats_app.services.smart_plan_service import SmartPlanService
 from mpstats_app.services.smart_pipeline_service import SmartPipelineService
@@ -40,6 +42,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     workflow_service = WorkflowService(settings=app_settings, repository=repository, catalog_service=catalog_service)
     smart_pipeline_service = SmartPipelineService(settings=app_settings, repository=repository, catalog_service=catalog_service)
     smart_plan_service = SmartPlanService(settings=app_settings, repository=repository)
+    project_service = ProjectService(settings=app_settings, repository=repository)
     export_service = ExportService(settings=app_settings, repository=repository)
     job_service = JobService(settings=app_settings, repository=repository)
     scheduler_service = SchedulerService(settings=app_settings, repository=repository, job_service=job_service)
@@ -66,6 +69,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     app.state.workflow_service = workflow_service
     app.state.smart_pipeline_service = smart_pipeline_service
     app.state.smart_plan_service = smart_plan_service
+    app.state.project_service = project_service
     app.state.export_service = export_service
     app.state.job_service = job_service
     app.state.scheduler_service = scheduler_service
@@ -82,6 +86,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     app.include_router(health_router)
     app.include_router(runs_router)
     app.include_router(products_router)
+    app.include_router(projects_router)
     app.include_router(exports_router)
     app.include_router(settings_router)
     app.include_router(schedules_router)

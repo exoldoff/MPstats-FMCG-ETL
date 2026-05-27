@@ -107,6 +107,39 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result.iloc[1]["Подкатегория"], "Прочее")
             self.assertEqual(result.iloc[0]["Тип"], "Прочие")
 
+    def test_otherwise_rule_never_overwrites_filled_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_file = root / "input.csv"
+            output_file = root / "output.csv"
+            rules_file = root / "rules.csv"
+
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"Категория": "Мясо", "Название": "мясной продукт"},
+                        {"Категория": "Мясо", "Название": "непонятный продукт"},
+                    ]
+                ),
+                input_file,
+            )
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Подкатегория;Название;contains;мясной;Мясо;fill_empty;;",
+                        "1;999;*;Подкатегория;;otherwise;;Прочее;overwrite;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result, report, _ = classify_file(input_file, output_file, rules_path=rules_file, write_xlsx=False)
+
+            self.assertEqual(report["applied_rows"].sum(), 2)
+            self.assertEqual(result["Подкатегория"].tolist(), ["Мясо", "Прочее"])
+
     def test_default_meat_rules_follow_reference_categories(self) -> None:
         cases = [
             ("Котлеты Три мяса Слово Мясника, 360 г", "Кулинария"),

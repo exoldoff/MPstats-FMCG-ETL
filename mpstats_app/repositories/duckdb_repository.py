@@ -61,6 +61,14 @@ def _period_index_to_label(index: int) -> str:
     return f"{year}-{month:02d}"
 
 
+def _max_iso(left: Any, right: Any) -> Any:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return max(str(left), str(right))
+
+
 def _ensure_table_accepts_source_columns(con: Any, *, table_name: str, quoted_table: str, df: pd.DataFrame) -> None:
     column_types = _table_column_types(con, table_name)
     for column in df.columns:
@@ -173,6 +181,253 @@ class DuckDbAppRepository:
     def get_setting(self, key: str) -> str | None:
         row = self._fetch_one("SELECT value FROM app_settings WHERE key = ?", [key])
         return str(row["value"]) if row and row.get("value") is not None else None
+
+    def list_project_database_summaries(self, *, table_name: str) -> list[dict[str, Any]]:
+        names: set[str] = set()
+        summaries: dict[str, dict[str, Any]] = {}
+
+        def ensure(project_name: str) -> dict[str, Any]:
+            if project_name not in summaries:
+                summaries[project_name] = {
+                    "project_name": project_name,
+                    "pipeline_runs_count": 0,
+                    "app_runs_count": 0,
+                    "tasks_count": 0,
+                    "cube_slices_count": 0,
+                    "cube_rows_count": 0,
+                    "product_rows_count": 0,
+                    "schedules_count": 0,
+                    "first_period": None,
+                    "latest_period": None,
+                    "latest_activity": None,
+                }
+            return summaries[project_name]
+
+        current_project = self.get_setting("project_name")
+        if current_project:
+            names.add(current_project)
+
+        for table, column in (
+            ("pipeline_runs", "project_name"),
+            ("download_tasks", "project_name"),
+            ("cube_registry", "project_name"),
+            ("app_runs", "project_name"),
+            ("app_schedules", "project_name"),
+            ("pipeline_loads", "project_name"),
+        ):
+            for row in self._fetch_records(
+                f"""
+                SELECT DISTINCT {column} AS project_name
+                FROM {table}
+                WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS VARCHAR)) <> ''
+                """
+            ):
+                names.add(str(row["project_name"]))
+
+        if self.table_exists(table_name):
+            columns = self.table_columns(table_name)
+            if "__project_name" in columns:
+                quoted_table = quote_identifier(table_name)
+                for row in self._fetch_records(
+                    f"""
+                    SELECT DISTINCT {quote_duckdb_name('__project_name')} AS project_name
+                    FROM {quoted_table}
+                    WHERE {quote_duckdb_name('__project_name')} IS NOT NULL
+                      AND TRIM(CAST({quote_duckdb_name('__project_name')} AS VARCHAR)) <> ''
+                    """
+                ):
+                    names.add(str(row["project_name"]))
+
+        for name in names:
+            ensure(name)
+
+        for row in self._fetch_records(
+            """
+            SELECT project_name, COUNT(*) AS pipeline_runs_count, MAX(updated_at) AS latest_activity
+            FROM pipeline_runs
+            GROUP BY project_name
+            """
+        ):
+            item = ensure(str(row["project_name"]))
+            item["pipeline_runs_count"] = int(row["pipeline_runs_count"] or 0)
+            item["latest_activity"] = row.get("latest_activity")
+
+        for row in self._fetch_records(
+            """
+            SELECT project_name, COUNT(*) AS app_runs_count, MAX(COALESCE(finished_at, started_at, created_at)) AS latest_activity
+            FROM app_runs
+            GROUP BY project_name
+            """
+        ):
+            item = ensure(str(row["project_name"]))
+            item["app_runs_count"] = int(row["app_runs_count"] or 0)
+            item["latest_activity"] = _max_iso(item.get("latest_activity"), row.get("latest_activity"))
+
+        for row in self._fetch_records(
+            """
+            SELECT project_name, COUNT(*) AS tasks_count, MAX(updated_at) AS latest_activity
+            FROM download_tasks
+            GROUP BY project_name
+            """
+        ):
+            item = ensure(str(row["project_name"]))
+            item["tasks_count"] = int(row["tasks_count"] or 0)
+            item["latest_activity"] = _max_iso(item.get("latest_activity"), row.get("latest_activity"))
+
+        for row in self._fetch_records(
+            """
+            SELECT
+                project_name,
+                COUNT(*) AS cube_slices_count,
+                SUM(rows_count) AS cube_rows_count,
+                MIN(year * 12 + month) AS first_period,
+                MAX(year * 12 + month) AS latest_period,
+                MAX(saved_to_db_at) AS latest_activity
+            FROM cube_registry
+            GROUP BY project_name
+            """
+        ):
+            item = ensure(str(row["project_name"]))
+            item["cube_slices_count"] = int(row["cube_slices_count"] or 0)
+            item["cube_rows_count"] = int(row["cube_rows_count"] or 0)
+            item["first_period"] = _period_index_to_label(int(row["first_period"])) if row.get("first_period") else None
+            item["latest_period"] = _period_index_to_label(int(row["latest_period"])) if row.get("latest_period") else None
+            item["latest_activity"] = _max_iso(item.get("latest_activity"), row.get("latest_activity"))
+
+        for row in self._fetch_records(
+            """
+            SELECT project_name, COUNT(*) AS schedules_count, MAX(updated_at) AS latest_activity
+            FROM app_schedules
+            GROUP BY project_name
+            """
+        ):
+            item = ensure(str(row["project_name"]))
+            item["schedules_count"] = int(row["schedules_count"] or 0)
+            item["latest_activity"] = _max_iso(item.get("latest_activity"), row.get("latest_activity"))
+
+        if self.table_exists(table_name):
+            columns = self.table_columns(table_name)
+            if "__project_name" in columns:
+                quoted_table = quote_identifier(table_name)
+                for row in self._fetch_records(
+                    f"""
+                    SELECT {quote_duckdb_name('__project_name')} AS project_name, COUNT(*) AS product_rows_count
+                    FROM {quoted_table}
+                    GROUP BY {quote_duckdb_name('__project_name')}
+                    """
+                ):
+                    item = ensure(str(row["project_name"]))
+                    item["product_rows_count"] = int(row["product_rows_count"] or 0)
+
+        return sorted(summaries.values(), key=lambda item: str(item["project_name"]).casefold())
+
+    def delete_project_records(self, *, project_name: str, table_name: str) -> dict[str, int]:
+        counts: dict[str, int] = {
+            "pipeline_runs": 0,
+            "download_tasks": 0,
+            "cube_registry": 0,
+            "app_runs": 0,
+            "app_run_steps": 0,
+            "app_run_events": 0,
+            "app_schedules": 0,
+            "pipeline_loads": 0,
+            "product_rows": 0,
+        }
+
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            counts["app_run_steps"] = int(
+                con.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM app_run_steps
+                    WHERE run_id IN (SELECT run_id FROM app_runs WHERE project_name = ?)
+                    """,
+                    [project_name],
+                ).fetchone()[0]
+            )
+            counts["app_run_events"] = int(
+                con.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM app_run_events
+                    WHERE run_id IN (SELECT run_id FROM app_runs WHERE project_name = ?)
+                    """,
+                    [project_name],
+                ).fetchone()[0]
+            )
+            for table in (
+                "pipeline_runs",
+                "download_tasks",
+                "cube_registry",
+                "app_runs",
+                "app_schedules",
+                "pipeline_loads",
+            ):
+                counts[table] = int(con.execute(f"SELECT COUNT(*) FROM {table} WHERE project_name = ?", [project_name]).fetchone()[0])
+
+            quoted_table = quote_identifier(table_name)
+            products_exists = bool(
+                con.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = 'main' AND table_name = ?
+                    """,
+                    [table_name],
+                ).fetchone()[0]
+            )
+            if products_exists:
+                product_columns = {
+                    str(row[0])
+                    for row in con.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'main' AND table_name = ?
+                        """,
+                        [table_name],
+                    ).fetchall()
+                }
+                if "__project_name" in product_columns:
+                    counts["product_rows"] = int(
+                        con.execute(
+                            f"SELECT COUNT(*) FROM {quoted_table} WHERE {quote_duckdb_name('__project_name')} = ?",
+                            [project_name],
+                        ).fetchone()[0]
+                    )
+
+            con.execute(
+                """
+                DELETE FROM app_run_steps
+                WHERE run_id IN (SELECT run_id FROM app_runs WHERE project_name = ?)
+                """,
+                [project_name],
+            )
+            con.execute(
+                """
+                DELETE FROM app_run_events
+                WHERE run_id IN (SELECT run_id FROM app_runs WHERE project_name = ?)
+                """,
+                [project_name],
+            )
+            for table in (
+                "download_tasks",
+                "pipeline_runs",
+                "cube_registry",
+                "app_schedules",
+                "pipeline_loads",
+                "app_runs",
+            ):
+                con.execute(f"DELETE FROM {table} WHERE project_name = ?", [project_name])
+
+            if products_exists and counts["product_rows"]:
+                con.execute(
+                    f"DELETE FROM {quoted_table} WHERE {quote_duckdb_name('__project_name')} = ?",
+                    [project_name],
+                )
+
+        return counts
 
     def upsert_category(self, category: dict[str, Any]) -> None:
         with self._lock, connect(self.settings.db_path) as con:

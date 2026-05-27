@@ -103,6 +103,9 @@ class ClassifierRulesService:
         target_column = str(rule.get("target_column") or "").strip()
         if active and not target_column:
             raise ValueError(f"Правило {row_num}: у активного правила должна быть целевая колонка.")
+        set_value = str(rule.get("set_value") or "").strip()
+        if active and not set_value:
+            raise ValueError(f"Правило {row_num}: у активного правила должно быть значение для записи.")
 
         return {
             "active": "1" if active else "0",
@@ -112,7 +115,7 @@ class ClassifierRulesService:
             "match_field": first["match_field"],
             "match_type": first["match_type"],
             "pattern": first["pattern"],
-            "set_value": str(rule.get("set_value") or "").strip(),
+            "set_value": set_value,
             "mode": mode,
             COMMENT_COLUMN: str(rule.get("comment") or "").strip(),
             CONDITIONS_COLUMN: json.dumps(extra, ensure_ascii=False) if extra else "",

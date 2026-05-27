@@ -216,6 +216,73 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(run_response.status_code, 200)
                 self.assertEqual(run_response.json()["status"], "queued")
 
+    def test_project_management_lists_and_deletes_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+
+            with TestClient(app) as client:
+                repository: DuckDbAppRepository = app.state.repository
+                repository.create_pipeline_run(
+                    run_id="plan-1",
+                    project_name="unit",
+                    run_type="historical_backfill",
+                    period_from="2025-01",
+                    period_to="2025-01",
+                    selected_category_ids=["category-1"],
+                    settings={},
+                )
+                repository.upsert_cube_entry(
+                    {
+                        "project_name": "unit",
+                        "year": 2025,
+                        "month": 1,
+                        "marketplace": "Ozon",
+                        "marketplace_code": "oz",
+                        "category_key": "test",
+                        "category_name": "Тест",
+                        "rows_count": 1,
+                        "source_processed_file_path": "unit.csv",
+                        "file_hash": "hash",
+                    }
+                )
+                csv_path = root / "classified.csv"
+                write_semicolon_csv(
+                    pd.DataFrame([{"Маркетплейс": "Ozon", "Категория": "Тест", "Название": "Товар"}]),
+                    csv_path,
+                )
+                repository.import_products_file_idempotent(
+                    run_id="plan-1",
+                    csv_path=csv_path,
+                    table_name=settings.products_table,
+                    project_name="unit",
+                    year=2025,
+                    month=1,
+                    marketplace_code="oz",
+                    category_key="test",
+                )
+                project_dir = root / "data" / "projects" / "unit"
+                (project_dir / "raw").mkdir(parents=True)
+                (project_dir / "raw" / "unit.csv").write_text("x", encoding="utf-8")
+
+                projects = client.get("/api/projects")
+                self.assertEqual(projects.status_code, 200)
+                unit = next(project for project in projects.json()["projects"] if project["project_name"] == "unit")
+                self.assertEqual(unit["cube_slices_count"], 1)
+                self.assertEqual(unit["product_rows_count"], 1)
+                self.assertTrue(unit["has_files"])
+
+                deleted = client.delete("/api/projects", params={"project_name": "unit", "delete_files": True})
+                self.assertEqual(deleted.status_code, 200)
+                self.assertEqual(deleted.json()["deleted"]["cube_registry"], 1)
+                self.assertEqual(deleted.json()["deleted"]["product_rows"], 1)
+                self.assertFalse(project_dir.exists())
+
+                after_delete = client.get("/api/projects")
+                self.assertNotIn("unit", {project["project_name"] for project in after_delete.json()["projects"]})
+
     def test_spa_fallback_does_not_shadow_unknown_api_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

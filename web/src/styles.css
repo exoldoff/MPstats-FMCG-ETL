@@ -371,8 +371,13 @@ select {
 
 .mini-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.mini-actions .ghost-button {
+  min-width: 0;
+  padding: 0 8px;
 }
 
 .hint {
@@ -1193,6 +1198,32 @@ th:nth-last-child(-n + 2) .column-filter-menu {
   background: #eaf4f2;
 }
 
+.projects-panel .table-wrap {
+  max-height: calc(100vh - 250px);
+}
+
+.project-name-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.project-name-cell strong {
+  color: #20363a;
+}
+
+.project-name-cell small {
+  color: #1f6f68;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.table-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
 .path-note {
   overflow: hidden;
   margin-bottom: 12px;
@@ -1328,6 +1359,42 @@ a.ghost-button {
   border: 1px solid #e1e8ea;
   border-radius: 8px;
   background: #fff;
+}
+
+.otherwise-row {
+  display: grid;
+  grid-template-columns: 90px minmax(220px, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid #bdd2d5;
+  border-radius: 8px;
+  background: #f4f9f8;
+}
+
+.otherwise-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.otherwise-copy strong {
+  color: #20363a;
+  font-size: 13px;
+}
+
+.otherwise-copy small,
+.rule-note {
+  color: #627176;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.rule-note {
+  padding: 8px 10px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #f8fafb;
 }
 
 .condition-prefix {
@@ -2096,8 +2163,10 @@ th {
   .quality-status-card,
   .external-file-grid,
   .two-cols,
+  .mini-actions,
   .filter-condition-row,
   .condition-row,
+  .otherwise-row,
   .export-filter-row,
   .export-summary-row,
   .quality-metrics {

@@ -169,6 +169,9 @@ def _validate_and_prepare_rules(rules_df: pd.DataFrame) -> pd.DataFrame:
     bad_target = active_rules.loc[active_rules["target_column"].eq(""), "row_num"].tolist()
     if bad_target:
         raise ValueError(f"Column 'target_column' must be non-empty in active rules rows: {bad_target}")
+    bad_set_value = active_rules.loc[active_rules["set_value"].eq(""), "row_num"].tolist()
+    if bad_set_value:
+        raise ValueError(f"Column 'set_value' must be non-empty in active rules rows: {bad_set_value}")
 
     parsed_conditions: list[list[dict[str, str]]] = []
     bad_match_field_rows: list[int] = []
@@ -326,6 +329,10 @@ def _build_rule_mask(
     )
 
 
+def _rule_uses_otherwise(match_type: str, conditions: list[dict[str, str]]) -> bool:
+    return match_type == "otherwise" or any(condition["match_type"] == "otherwise" for condition in conditions)
+
+
 def apply_classifiers(
     df: pd.DataFrame,
     rules_path: str | Path | None = None,
@@ -399,7 +406,10 @@ def apply_classifiers(
             mask = mask & cat_mask
 
         candidate_rows = int(mask.sum())
-        if rule.mode == "fill_empty":
+        if _rule_uses_otherwise(rule.match_type, conditions):
+            target_empty = _is_empty_series(out[rule.target_column])
+            write_mask = mask & target_empty
+        elif rule.mode == "fill_empty":
             target_empty = _is_empty_series(out[rule.target_column])
             write_mask = mask & target_empty
         else:

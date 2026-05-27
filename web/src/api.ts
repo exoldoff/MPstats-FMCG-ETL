@@ -55,6 +55,33 @@ export type WorkflowSettings = {
   end_month?: number | null;
 };
 
+export type ProjectSummary = {
+  project_name: string;
+  is_current: boolean;
+  data_path: string;
+  has_files: boolean;
+  files_count: number;
+  files_size: number;
+  pipeline_runs_count: number;
+  app_runs_count: number;
+  total_runs_count: number;
+  tasks_count: number;
+  cube_slices_count: number;
+  cube_rows_count: number;
+  product_rows_count: number;
+  schedules_count: number;
+  first_period?: string | null;
+  latest_period?: string | null;
+  latest_activity?: string | null;
+};
+
+export type ProjectDeleteResponse = {
+  project_name: string;
+  deleted: Record<string, number>;
+  deleted_file_paths: string[];
+  skipped_file_paths: string[];
+};
+
 export type PipelineSettings = {
   overwrite_raw: boolean;
   overwrite_processed: boolean;
@@ -413,6 +440,12 @@ export const api = {
   getPipelineSettings: () => request<PipelineSettings>("/api/workflow/pipeline/settings"),
   savePipelineSettings: (payload: PipelineSettings) =>
     request<PipelineSettings>("/api/workflow/pipeline/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  listProjects: () => request<{ projects: ProjectSummary[] }>("/api/projects"),
+  deleteProject: (projectName: string, deleteFiles: boolean) =>
+    request<ProjectDeleteResponse>(
+      `/api/projects?project_name=${encodeURIComponent(projectName)}&delete_files=${encodeURIComponent(String(deleteFiles))}`,
+      { method: "DELETE" }
+    ),
   listCategories: () => request<{ categories: Category[] }>("/api/workflow/categories"),
   syncCategories: () => request<{ imported: number; source?: string | null }>("/api/workflow/categories/sync", { method: "POST" }),
   getCategorySource: () => request<{ path: string; rows: CategorySourceRow[] }>("/api/workflow/categories/source"),

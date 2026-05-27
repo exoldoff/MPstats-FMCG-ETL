@@ -46,6 +46,7 @@ import {
   PipelineRun,
   PipelineSettings,
   ProductSearch,
+  ProjectSummary,
   ProjectFile,
   QualityProblem,
   QualityProject,
@@ -56,7 +57,7 @@ import {
 } from "./api";
 
 type Mode = "historical_backfill" | "monthly_sync";
-type Tab = "categories" | "catalog" | "plan" | "files" | "cube" | "export" | "classifier" | "quality";
+type Tab = "projects" | "categories" | "catalog" | "plan" | "files" | "cube" | "export" | "classifier" | "quality";
 type FileKindFilter = "all" | "raw" | "processed" | "classified" | "export" | "other";
 
 const defaultPipelineSettings: PipelineSettings = {
@@ -85,7 +86,7 @@ const matchTypes = [
   ["regex", "regex"],
   ["equals", "равно"],
   ["startswith", "начинается с"],
-  ["otherwise", "иначе"]
+  ["otherwise", "если пусто"]
 ];
 
 const exportFilterTypes = [
@@ -410,6 +411,8 @@ export function App() {
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [fileKindFilter, setFileKindFilter] = useState<FileKindFilter>("all");
   const [cube, setCube] = useState<CubeItem[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectQuery, setProjectQuery] = useState("");
   const [qualityProjects, setQualityProjects] = useState<QualityProject[]>([]);
   const [qualityProjectName, setQualityProjectName] = useState("");
   const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
@@ -486,14 +489,20 @@ export function App() {
     void loadQualityProjects();
   }, [tab]);
 
+  useEffect(() => {
+    if (tab !== "projects") return;
+    void loadProjects();
+  }, [tab]);
+
   async function initialLoad() {
     setError(null);
     const loadErrors: string[] = [];
-    const [settingsResult, pipelineResult, categoryResult, rulesResult] = await Promise.allSettled([
+    const [settingsResult, pipelineResult, categoryResult, rulesResult, projectsResult] = await Promise.allSettled([
       api.getWorkflowSettings(),
       api.getPipelineSettings(),
       api.listCategories(),
-      api.getClassifierRules()
+      api.getClassifierRules(),
+      api.listProjects()
     ]);
 
     let loadedProjectName = projectName || "mpstats";
@@ -533,6 +542,12 @@ export function App() {
       addLoadError(loadErrors, "Правила классификатора", rulesResult.reason);
     }
 
+    if (projectsResult.status === "fulfilled") {
+      setProjects(projectsResult.value.projects);
+    } else {
+      addLoadError(loadErrors, "Проекты", projectsResult.reason);
+    }
+
     try {
       const runResponse = await api.listRuns(loadedProjectName);
       setRuns(runResponse.runs);
@@ -570,9 +585,9 @@ export function App() {
     }
   }
 
-  async function refreshFilesAndCube() {
+  async function refreshFilesAndCube(targetProjectName = projectName) {
     try {
-      const [fileResponse, cubeResponse] = await Promise.all([api.listFiles(projectName), api.listCube(projectName)]);
+      const [fileResponse, cubeResponse] = await Promise.all([api.listFiles(targetProjectName), api.listCube(targetProjectName)]);
       setFiles(fileResponse.files);
       setCube(cubeResponse.items);
     } catch (exc) {
@@ -587,6 +602,62 @@ export function App() {
     } catch (exc) {
       setError(`Куб: ${errorText(exc)}`);
     }
+  }
+
+  async function loadProjects() {
+    try {
+      const response = await api.listProjects();
+      setProjects(response.projects);
+      return response;
+    } catch (exc) {
+      setError(`Проекты: ${errorText(exc)}`);
+      throw exc;
+    }
+  }
+
+  async function openProject(targetProjectName: string) {
+    setProjectName(targetProjectName);
+    setRun(null);
+    setSmartPlan(null);
+    setProducts(null);
+    const [runResponse, cubeResponse, fileResponse] = await Promise.all([
+      api.listRuns(targetProjectName),
+      api.listCube(targetProjectName),
+      api.listFiles(targetProjectName)
+    ]);
+    setRuns(runResponse.runs);
+    setCube(cubeResponse.items);
+    setFiles(fileResponse.files);
+    if (runResponse.runs[0]) {
+      setRun(runResponse.runs[0]);
+      await refreshRun(runResponse.runs[0].id, "all");
+    }
+    setTab("plan");
+    return { project_name: targetProjectName };
+  }
+
+  async function deleteProject(targetProjectName: string, deleteFiles: boolean) {
+    const response = await api.deleteProject(targetProjectName, deleteFiles);
+    await loadProjects();
+    if (targetProjectName === projectName) {
+      setProjectName("mpstats");
+      setRun(null);
+      setSmartPlan(null);
+      setFiles([]);
+      setCube([]);
+      setProducts(null);
+      const settings = await api.saveWorkflowSettings({
+        cookie,
+        project_name: "mpstats",
+        workflow_mode: mode,
+        start_year: startYear,
+        start_month: startMonth,
+        end_year: endYear,
+        end_month: endMonth
+      });
+      setProjectName(settings.project_name || "mpstats");
+    }
+    return response;
   }
 
   async function loadDbPreview() {
@@ -811,6 +882,13 @@ export function App() {
     });
   }, [classifierRules, classifierQuery]);
   const selectedRule = useMemo(() => classifierRules.find((rule) => rule.id === selectedRuleId) ?? classifierRules[0] ?? null, [classifierRules, selectedRuleId]);
+  const filteredProjects = useMemo(() => {
+    const text = projectQuery.trim().toLowerCase();
+    if (!text) return projects;
+    return projects.filter((project) =>
+      `${project.project_name} ${project.data_path} ${project.latest_period ?? ""}`.toLowerCase().includes(text)
+    );
+  }, [projects, projectQuery]);
   const filteredFiles = useMemo(() => {
     if (fileKindFilter === "all") return files;
     return files.filter((file) => file.kind === fileKindFilter);
@@ -1199,17 +1277,22 @@ export function App() {
                 <FileSpreadsheet size={17} />
                 Правила
               </button>
-              <button className="ghost-button" title="Открывает CSV-справочник категорий и путей." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>
-                <FolderSync size={17} />
-                Справочник
-              </button>
-            </div>
-          </section>
+	              <button className="ghost-button" title="Открывает CSV-справочник категорий и путей." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>
+	                <FolderSync size={17} />
+	                Справочник
+	              </button>
+	              <button className="ghost-button" title="Показать сохранённые проекты, кубы, файлы и удаления." onClick={() => { setTab("projects"); void loadProjects(); }}>
+	                <Archive size={17} />
+	                Проекты
+	              </button>
+	            </div>
+	          </section>
         </aside>
 
         <section className="center-stage">
-          <nav className="tabs">
-            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
+	          <nav className="tabs">
+	            <button className={tab === "projects" ? "active" : ""} title="Список проектов, выбор и удаление." onClick={() => { setTab("projects"); void loadProjects(); }}>Проекты</button>
+	            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
             <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => setTab("categories")}>Категории</button>
             <button className={tab === "catalog" ? "active" : ""} title="Редактор CSV-справочника категорий." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>Справочник</button>
             <button className={tab === "files" ? "active" : ""} onClick={() => { setTab("files"); void refreshFilesAndCube(); }}>Файлы</button>
@@ -1219,8 +1302,22 @@ export function App() {
             <button className={tab === "classifier" ? "active" : ""} title="Правила классификатора без ручного JSON." onClick={() => setTab("classifier")}>Классификатор</button>
           </nav>
 
-          {tab === "categories" ? (
-            <section className="panel stage-panel">
+	          {tab === "projects" ? (
+	            <ProjectsWorkspace
+	              projects={filteredProjects}
+	              totalProjects={projects.length}
+	              currentProjectName={projectName}
+	              query={projectQuery}
+	              busy={Boolean(busy)}
+	              onQueryChange={setProjectQuery}
+	              onReload={() => void runAction("Обновление списка проектов", loadProjects)}
+	              onOpen={(name) => void runAction("Открытие проекта", () => openProject(name))}
+	              onDelete={(name, deleteFiles) => void runAction("Удаление проекта", () => deleteProject(name, deleteFiles))}
+	            />
+	          ) : null}
+
+	          {tab === "categories" ? (
+	            <section className="panel stage-panel">
               <SectionTitle icon={<ListChecks />} title="Категории" meta={`${selected.size} путей выбрано`} hint="Здесь выбираются активные пути из справочника для создания плана загрузки." />
               <div className="toolbar">
                 <label className="search-field">
@@ -1552,11 +1649,15 @@ function ruleModeLabel(mode: string) {
   return ruleModes.find(([value]) => value === mode)?.[1] ?? mode;
 }
 
+function ruleHasOtherwise(rule: ClassifierRule) {
+  return rule.conditions.some((condition) => condition.match_type === "otherwise");
+}
+
 function ruleConditionSummary(rule: ClassifierRule) {
   const first = rule.conditions[0];
-  if (first?.match_type === "otherwise") {
+  if (ruleHasOtherwise(rule)) {
     const category = rule.category && rule.category !== "*" ? ` [${rule.category}]` : "";
-    return `иначе${category}`;
+    return `если «${rule.target_column || "целевая колонка"}» пусто${category}`;
   }
   if (!first?.match_field && !first?.pattern) return "условие не задано";
   const category = rule.category && rule.category !== "*" ? ` [${rule.category}]` : "";
@@ -1631,6 +1732,85 @@ function Metric(props: { label: string; value: string }) {
 function Badge(props: { value: string }) {
   const value = props.value || "pending";
   return <span className={`badge ${value}`}>{statusLabels[value] ?? value}</span>;
+}
+
+function ProjectsWorkspace(props: {
+  projects: ProjectSummary[];
+  totalProjects: number;
+  currentProjectName: string;
+  query: string;
+  busy: boolean;
+  onQueryChange: (value: string) => void;
+  onReload: () => void;
+  onOpen: (projectName: string) => void;
+  onDelete: (projectName: string, deleteFiles: boolean) => void;
+}) {
+  const [deleteFiles, setDeleteFiles] = useState(true);
+
+  function confirmDelete(project: ProjectSummary) {
+    const fileText = deleteFiles ? `\n\nПапка файлов тоже будет удалена:\n${project.data_path}` : "\n\nФайлы проекта останутся на диске.";
+    const ok = window.confirm(`Удалить проект «${project.project_name}» из локальной БД?${fileText}`);
+    if (ok) props.onDelete(project.project_name, deleteFiles);
+  }
+
+  return (
+    <section className="panel stage-panel projects-panel">
+      <SectionTitle
+        icon={<Archive />}
+        title="Проекты"
+        meta={`${props.projects.length}/${props.totalProjects}`}
+        hint="Здесь видны рабочие области: планы, задачи, срезы куба, строки БД и локальные файлы. Открытие проекта меняет текущий project name."
+      />
+      <div className="toolbar wrap">
+        <label className="search-field">
+          <Search size={17} />
+          <input value={props.query} onChange={(event) => props.onQueryChange(event.target.value)} placeholder="Найти проект или путь" />
+        </label>
+        <Toggle label="Удалять файлы" checked={deleteFiles} onChange={setDeleteFiles} />
+        <button className="ghost-button" disabled={props.busy} onClick={props.onReload}><RefreshCcw size={17} />Обновить</button>
+      </div>
+      <FilterableTable
+        className="project-table"
+        rows={props.projects}
+        rowKey={(project) => project.project_name}
+        getRowClassName={(project) => project.project_name === props.currentProjectName ? "selected-row" : ""}
+        emptyText="Проекты пока не найдены."
+        columns={[
+          {
+            id: "project",
+            label: "Проект",
+            value: (project) => project.project_name,
+            render: (project) => (
+              <span className="project-name-cell">
+                <strong>{project.project_name}</strong>
+                {project.project_name === props.currentProjectName ? <small>текущий</small> : null}
+              </span>
+            )
+          },
+          {
+            id: "actions",
+            label: "Действия",
+            value: () => "",
+            filterable: false,
+            sortable: false,
+            render: (project) => (
+              <div className="table-actions">
+                <button className="tiny-button" disabled={props.busy} onClick={() => props.onOpen(project.project_name)}>Открыть</button>
+                <button className="tiny-button danger-inline" disabled={props.busy} onClick={() => confirmDelete(project)}>Удалить</button>
+              </div>
+            )
+          },
+          { id: "period", label: "Период", value: (project) => project.latest_period ? `${project.first_period ?? "?"} - ${project.latest_period}` : "-", sortValue: (project) => project.latest_period ?? "" },
+          { id: "cube", label: "Куб", value: (project) => project.cube_slices_count, render: (project) => `${formatNumber(project.cube_slices_count)} срезов`, numeric: true },
+          { id: "rows", label: "Строк БД", value: (project) => project.product_rows_count, render: (project) => formatNumber(project.product_rows_count), numeric: true },
+          { id: "tasks", label: "Задачи", value: (project) => project.tasks_count, render: (project) => formatNumber(project.tasks_count), numeric: true },
+          { id: "files", label: "Файлы", value: (project) => project.files_count, render: (project) => `${formatNumber(project.files_count)} / ${formatBytes(project.files_size)}`, numeric: true },
+          { id: "updated", label: "Обновлён", value: (project) => project.latest_activity ?? "-", render: (project) => formatDateTime(project.latest_activity) },
+          { id: "path", label: "Папка", value: (project) => project.data_path, title: (project) => project.data_path }
+        ]}
+      />
+    </section>
+  );
 }
 
 function FilesTable(props: { files: ProjectFile[] }) {
@@ -2292,6 +2472,21 @@ function formatNumber(value: number | null | undefined) {
   return new Intl.NumberFormat("ru-RU").format(Number(value || 0));
 }
 
+function formatBytes(value: number | null | undefined) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${formatNumber(bytes)} Б`;
+  if (bytes < 1024 * 1024) return `${formatNumber(Math.round(bytes / 102.4) / 10)} КБ`;
+  if (bytes < 1024 * 1024 * 1024) return `${formatNumber(Math.round(bytes / 104857.6) / 10)} МБ`;
+  return `${formatNumber(Math.round(bytes / 107374182.4) / 10)} ГБ`;
+}
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ru-RU");
+}
+
 function CategorySourceEditor(props: {
   rows: CategorySourceRow[];
   selectedRow: CategorySourceRow | null;
@@ -2501,7 +2696,7 @@ function ClassifierRulesEditor(props: {
         <button className="chip-button" onClick={() => props.onAddPreset("name-to-subcategory")}>по названию</button>
         <button className="chip-button" onClick={() => props.onAddPreset("sku-to-subcategory")}>по точному SKU</button>
         <button className="chip-button" onClick={() => props.onAddPreset("name-to-brand")}>бренд из названия</button>
-        <button className="chip-button" onClick={() => props.onAddPreset("otherwise")}>иначе</button>
+        <button className="chip-button" onClick={() => props.onAddPreset("otherwise")}>если пусто</button>
       </div>
       <p className="path-note" title={props.rulesPath}>{props.rulesPath || "Файл правил ещё не выбран"}</p>
       <div className="external-classifier">
@@ -2549,7 +2744,7 @@ function ClassifierRulesEditor(props: {
       <div className="editor-layout">
         {rule ? (
           <div className="editor-form">
-            <SectionTitle icon={<Settings />} title="Правило" hint="Заполни правило как фразу: если в колонке найден текст, то записать нужное значение в нужную колонку." />
+            <SectionTitle icon={<Settings />} title="Правило" hint="Обычное правило ищет текст в выбранной колонке. Правило «если пусто» заполняет целевую колонку только там, где после правил выше ещё пусто." />
             <Toggle label="Правило активно" checked={rule.active} onChange={(value) => props.onChange(rule.id, { active: value })} />
             <datalist id="classifier-columns">
               {commonClassifierColumns.map((column) => <option key={column} value={column} />)}
@@ -2566,24 +2761,35 @@ function ClassifierRulesEditor(props: {
                 <h3>Условия</h3>
                 <button className="tiny-button" title="Добавить дополнительное условие AND/OR." onClick={() => props.onAddCondition(rule.id)}><Plus size={14} />условие</button>
               </div>
-              <div className="condition-list">
-                {rule.conditions.map((condition, index) => (
-                  <div className="condition-row" key={`${rule.id}-${index}`}>
-                    {index === 0 ? (
-                      <span className="condition-prefix">Если</span>
-                    ) : (
-                      <label>Связка<select value={condition.join_with_prev} onChange={(event) => props.onConditionChange(rule.id, index, { join_with_prev: event.target.value })}><option value="and">И</option><option value="or">ИЛИ</option></select></label>
-                    )}
-                    <label>Где искать<input list="classifier-columns" value={condition.match_field} disabled={condition.match_type === "otherwise"} onChange={(event) => props.onConditionChange(rule.id, index, { match_field: event.target.value })} placeholder="Название, SKU, Бренд..." /></label>
-                    <label>Как искать<select value={condition.match_type} onChange={(event) => {
-                      const matchType = event.target.value;
-                      props.onConditionChange(rule.id, index, matchType === "otherwise" ? { match_type: matchType, match_field: "", pattern: "" } : { match_type: matchType });
-                    }}>{matchTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-                    <label>Что искать<input value={condition.pattern} disabled={condition.match_type === "otherwise"} onChange={(event) => props.onConditionChange(rule.id, index, { pattern: event.target.value })} placeholder={condition.match_type === "otherwise" ? "не нужно" : "Например: лимон"} /></label>
-                    <button className="tiny-button danger-inline" title="Удалить условие." disabled={rule.conditions.length <= 1} onClick={() => props.onDeleteCondition(rule.id, index)}><Trash2 size={14} /></button>
-                  </div>
-                ))}
-              </div>
+	              <div className="condition-list">
+	                {rule.conditions.map((condition, index) => (
+	                  condition.match_type === "otherwise" ? (
+	                    <div className="otherwise-row" key={`${rule.id}-${index}`}>
+	                      <span className="condition-prefix">Если пусто</span>
+	                      <div className="otherwise-copy">
+	                        <strong>Если поле «{rule.target_column || "целевая колонка"}» осталось пустым</strong>
+	                        <small>записать «{rule.set_value || "значение не задано"}». Это fallback-строка, она не ищет текст и никогда не перезаписывает уже заполненные значения.</small>
+	                      </div>
+	                      <button className="tiny-button danger-inline" title="Удалить fallback-условие." disabled={rule.conditions.length <= 1} onClick={() => props.onDeleteCondition(rule.id, index)}><Trash2 size={14} /></button>
+	                    </div>
+	                  ) : (
+	                    <div className="condition-row" key={`${rule.id}-${index}`}>
+	                      {index === 0 ? (
+	                        <span className="condition-prefix">Если</span>
+	                      ) : (
+	                        <label>Связка<select value={condition.join_with_prev} onChange={(event) => props.onConditionChange(rule.id, index, { join_with_prev: event.target.value })}><option value="and">И</option><option value="or">ИЛИ</option></select></label>
+	                      )}
+	                      <label>Где искать<input list="classifier-columns" value={condition.match_field} onChange={(event) => props.onConditionChange(rule.id, index, { match_field: event.target.value })} placeholder="Название, SKU, Бренд..." /></label>
+	                      <label>Как искать<select value={condition.match_type} onChange={(event) => {
+	                        const matchType = event.target.value;
+	                        props.onConditionChange(rule.id, index, matchType === "otherwise" ? { match_type: matchType, match_field: "", pattern: "" } : { match_type: matchType });
+	                      }}>{matchTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+	                      <label>Что искать<input value={condition.pattern} onChange={(event) => props.onConditionChange(rule.id, index, { pattern: event.target.value })} placeholder="Например: лимон" /></label>
+	                      <button className="tiny-button danger-inline" title="Удалить условие." disabled={rule.conditions.length <= 1} onClick={() => props.onDeleteCondition(rule.id, index)}><Trash2 size={14} /></button>
+	                    </div>
+	                  )
+	                ))}
+	              </div>
             </div>
             <div className="rule-block">
               <h3>2. Что записать</h3>
@@ -2594,11 +2800,12 @@ function ClassifierRulesEditor(props: {
             </div>
             <div className="rule-block">
               <h3>3. Как применять</h3>
-              <div className="form-grid two-cols">
-                <label>Режим<select value={rule.mode} onChange={(event) => props.onChange(rule.id, { mode: event.target.value })}>{ruleModes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-                <label>Заметка<input value={rule.comment} onChange={(event) => props.onChange(rule.id, { comment: event.target.value })} placeholder="Для себя, можно пусто" /></label>
-              </div>
-            </div>
+	              <div className="form-grid two-cols">
+	                <label>Режим<select value={rule.mode} onChange={(event) => props.onChange(rule.id, { mode: event.target.value })}>{ruleModes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+	                <label>Заметка<input value={rule.comment} onChange={(event) => props.onChange(rule.id, { comment: event.target.value })} placeholder="Для себя, можно пусто" /></label>
+	              </div>
+	              {ruleHasOtherwise(rule) ? <p className="rule-note">Для fallback-строки движок всегда заполняет только пустые ячейки целевой колонки, даже если в CSV остался режим «перезаписать».</p> : null}
+	            </div>
             <button className="danger-button" title="Удалить выбранное правило. Файл изменится только после сохранения." onClick={() => props.onDelete(rule.id)}>
               <Trash2 size={17} />Удалить правило
             </button>
