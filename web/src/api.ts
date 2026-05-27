@@ -441,6 +441,8 @@ export const api = {
   savePipelineSettings: (payload: PipelineSettings) =>
     request<PipelineSettings>("/api/workflow/pipeline/settings", { method: "PUT", body: JSON.stringify(payload) }),
   listProjects: () => request<{ projects: ProjectSummary[] }>("/api/projects"),
+  createProject: (projectName: string) =>
+    request<ProjectSummary>("/api/projects", { method: "POST", body: JSON.stringify({ project_name: projectName }) }),
   deleteProject: (projectName: string, deleteFiles: boolean) =>
     request<ProjectDeleteResponse>(
       `/api/projects?project_name=${encodeURIComponent(projectName)}&delete_files=${encodeURIComponent(String(deleteFiles))}`,

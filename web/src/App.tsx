@@ -620,11 +620,12 @@ export function App() {
     }
   }
 
-  async function openProject(targetProjectName: string) {
+  async function openProject(targetProjectName: string, nextTab: Tab | null = "plan") {
     setProjectName(targetProjectName);
     setRun(null);
     setSmartPlan(null);
     setProducts(null);
+    await api.saveWorkflowSettings(workflowSettingsPayload(targetProjectName));
     const [runResponse, cubeResponse, fileResponse] = await Promise.all([
       api.listRuns(targetProjectName),
       api.listCube(targetProjectName),
@@ -637,8 +638,16 @@ export function App() {
       setRun(runResponse.runs[0]);
       await refreshRun(runResponse.runs[0].id, "all");
     }
-    setTab("plan");
+    if (nextTab) setTab(nextTab);
     return { project_name: targetProjectName };
+  }
+
+  async function createProject(targetProjectName: string) {
+    const created = await api.createProject(targetProjectName);
+    await loadProjects();
+    await openProject(created.project_name, null);
+    setTab("projects");
+    return created;
   }
 
   async function deleteProject(targetProjectName: string, deleteFiles: boolean) {
@@ -894,6 +903,11 @@ export function App() {
       `${project.project_name} ${project.data_path} ${project.latest_period ?? ""}`.toLowerCase().includes(text)
     );
   }, [projects, projectQuery]);
+  const projectOptions = useMemo(() => {
+    const names = projects.map((project) => project.project_name);
+    if (projectName && !names.includes(projectName)) names.unshift(projectName);
+    return names;
+  }, [projects, projectName]);
   const filteredFiles = useMemo(() => {
     if (fileKindFilter === "all") return files;
     return files.filter((file) => file.kind === fileKindFilter);
@@ -1142,16 +1156,20 @@ export function App() {
     await refreshCube(projectName);
   }
 
-  function saveCurrentWorkflowSettings() {
-    return api.saveWorkflowSettings({
+  function workflowSettingsPayload(targetProjectName = projectName) {
+    return {
       cookie,
-      project_name: projectName,
+      project_name: targetProjectName,
       workflow_mode: mode,
       start_year: startYear,
       start_month: startMonth,
       end_year: endYear,
       end_month: endMonth
-    });
+    };
+  }
+
+  function saveCurrentWorkflowSettings() {
+    return api.saveWorkflowSettings(workflowSettingsPayload());
   }
 
   return (
@@ -1198,8 +1216,21 @@ export function App() {
             <SectionTitle icon={<Settings />} title="Проект и доступ" hint="Project name разделяет файлы, manifest и записи БД. Cookie нужен только для скачивания из MPStats." />
             <div className="form-grid">
               <label>
-                <FieldLabel text="Название проекта" hint="Имя рабочего набора. По нему приложение разделяет планы, файлы и записи в БД; лучше писать коротко и понятно, например «Сахар»." />
-                <input value={projectName} onChange={(event) => setProjectName(event.target.value)} />
+                <FieldLabel text="Текущий проект" hint="Выбор только из созданных проектов. Новый проект создаётся в разделе «Проекты» кнопкой «Создать»." />
+                <select
+                  value={projectName}
+                  disabled={Boolean(busy) || projectOptions.length === 0}
+                  onChange={(event) => {
+                    const nextProjectName = event.target.value;
+                    if (nextProjectName && nextProjectName !== projectName) {
+                      void runAction("Открытие проекта", () => openProject(nextProjectName, null));
+                    }
+                  }}
+                >
+                  {projectOptions.map((name) => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
               </label>
               <label>
                 <FieldLabel text="MPStats cookie" hint="Cookie текущей авторизованной сессии MPStats. Нужен только для скачивания; если устарел, задачи будут падать с ошибкой доступа." />
@@ -1322,6 +1353,7 @@ export function App() {
 	              busy={Boolean(busy)}
 	              onQueryChange={setProjectQuery}
 	              onReload={() => void runAction("Обновление списка проектов", loadProjects)}
+	              onCreate={(name) => void runAction("Создание проекта", () => createProject(name))}
 	              onOpen={(name) => void runAction("Открытие проекта", () => openProject(name))}
 	              onDelete={(name, deleteFiles) => void runAction("Удаление проекта", () => deleteProject(name, deleteFiles))}
 	            />
@@ -1772,15 +1804,24 @@ function ProjectsWorkspace(props: {
   busy: boolean;
   onQueryChange: (value: string) => void;
   onReload: () => void;
+  onCreate: (projectName: string) => void;
   onOpen: (projectName: string) => void;
   onDelete: (projectName: string, deleteFiles: boolean) => void;
 }) {
   const [deleteFiles, setDeleteFiles] = useState(true);
+  const [draftName, setDraftName] = useState("");
 
   function confirmDelete(project: ProjectSummary) {
     const fileText = deleteFiles ? `\n\nПапка файлов тоже будет удалена:\n${project.data_path}` : "\n\nФайлы проекта останутся на диске.";
     const ok = window.confirm(`Удалить проект «${project.project_name}» из локальной БД?${fileText}`);
     if (ok) props.onDelete(project.project_name, deleteFiles);
+  }
+
+  function submitCreate() {
+    const projectName = draftName.trim();
+    if (!projectName) return;
+    props.onCreate(projectName);
+    setDraftName("");
   }
 
   return (
@@ -1789,8 +1830,28 @@ function ProjectsWorkspace(props: {
         icon={<Archive />}
         title="Проекты"
         meta={`${props.projects.length}/${props.totalProjects}`}
-        hint="Здесь видны рабочие области: планы, задачи, срезы куба, строки БД и локальные файлы. Открытие проекта меняет текущий project name."
+        hint="Здесь создаются и выбираются рабочие области: планы, задачи, срезы куба, строки БД и локальные файлы."
       />
+      <div className="project-create-panel">
+        <label>
+          <FieldLabel text="Новый проект" hint="Напиши понятное имя рабочего набора. После создания он появится в списке и станет текущим." />
+          <input
+            value={draftName}
+            onChange={(event) => setDraftName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitCreate();
+              }
+            }}
+            placeholder="Например: Сахар"
+          />
+        </label>
+        <button className="primary-inline-button" disabled={props.busy || !draftName.trim()} onClick={submitCreate}>
+          <Plus size={17} />
+          Создать
+        </button>
+      </div>
       <div className="toolbar wrap">
         <label className="search-field">
           <Search size={17} />
@@ -2922,7 +2983,7 @@ function ProductInstructionModal(props: { onClose: () => void }) {
         <div className="instruction-content">
           <section className="instruction-section">
             <h3>1. Проект и доступ</h3>
-            <p>В поле «Название проекта» напиши понятное имя выгрузки. По нему приложение раскладывает файлы, планы и записи в БД. Cookie нужен только для скачивания из MPStats: вставляешь его, сохраняешь настройки и дальше работаешь через кнопки.</p>
+            <p>Новый проект создаётся в разделе «Проекты» кнопкой «Создать». Слева выбирается только уже созданный проект: по нему приложение раскладывает файлы, планы и записи в БД. Cookie нужен только для скачивания из MPStats: вставляешь его, сохраняешь настройки и дальше работаешь через кнопки.</p>
           </section>
           <section className="instruction-section">
             <h3>2. Справочник</h3>

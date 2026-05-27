@@ -224,6 +224,18 @@ class WebApiTest(unittest.TestCase):
             app = create_app(settings, start_workers=False)
 
             with TestClient(app) as client:
+                created = client.post("/api/projects", json={"project_name": "Новый проект"})
+                self.assertEqual(created.status_code, 200)
+                self.assertEqual(created.json()["project_name"], "Новый проект")
+                self.assertTrue((root / "data" / "projects" / "Новый_проект").exists())
+                self.assertFalse(created.json()["has_files"])
+
+                after_create = client.get("/api/projects")
+                self.assertIn("Новый проект", {project["project_name"] for project in after_create.json()["projects"]})
+                self.assertTrue(
+                    next(project for project in after_create.json()["projects"] if project["project_name"] == "Новый проект")["is_current"]
+                )
+
                 repository: DuckDbAppRepository = app.state.repository
                 repository.create_pipeline_run(
                     run_id="plan-1",

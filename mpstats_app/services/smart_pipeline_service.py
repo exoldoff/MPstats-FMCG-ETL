@@ -79,7 +79,7 @@ def category_uses_fbs(category: dict[str, Any]) -> bool:
 
 
 def safe_segment(value: str) -> str:
-    segment = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    segment = re.sub(r"[^\w_.-]+", "_", value.strip(), flags=re.UNICODE)
     return segment.strip("._") or "mpstats"
 
 
