@@ -7,6 +7,7 @@ import unittest
 
 import pandas as pd
 
+from classifiers.engine import apply_classifiers, default_rules_path
 from pipeline.repositories.file_repository import write_semicolon_csv
 from pipeline.services.classification_service import classify_file
 from pipeline.services.enrich_service import (
@@ -105,6 +106,33 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result.iloc[0]["Подкатегория"], "Мясо")
             self.assertEqual(result.iloc[1]["Подкатегория"], "Прочее")
             self.assertEqual(result.iloc[0]["Тип"], "Прочие")
+
+    def test_default_meat_rules_follow_reference_categories(self) -> None:
+        cases = [
+            ("Котлеты Три мяса Слово Мясника, 360 г", "Кулинария"),
+            ("Биточки для всей семьи Слово Мясника, 360 г", "Кулинария"),
+            ("Митболы Скандинавские Слово Мясника из говядины и свинины, 360 г", "Кулинария"),
+            ("Сатэ по-тайски Слово Мясника, 700 г", "Маринады"),
+            ("Слово мясника Корейка свиная Каджун охлажденная, 0.7-0.8кг", "Маринады"),
+            ("Корейка свиная без кости Слово Мясника, 800 г", "Крупнокусковые"),
+            ("Чевапчичи Слово Мясника из свинины и говядины, 300 г", "Колбаски"),
+            ("Гуляш свиной Слово Мясника 400 г", "Мелкокусковые"),
+            ("Шашлык свиной Слово мясника Классический в маринаде охлажденный, 1.7кг", "Шашлык"),
+            ("Ребрышки свиные в ягодном маринаде Слово Мясника, 700 г", "Ребрышки маринадные"),
+            ("Ребра свиные Слово Мясника, 500 г", "Ребра крупнокусковые"),
+            ("Фарш Классический Слово Мясника из свинины и говядины, 400 г", "Фарш"),
+            ("Шницель свиной Слово Мясника, 400 г", "Порционные"),
+            ("Бефстроганов из свинины СЛОВО МЯСНИКА категория Б, 700г", "Прочее"),
+            ("Стейк Порк свиной Слово Мясника, 280 г", "Маринады"),
+            ("К Люля-кебаб Три мяса в оболочке, 370 г, Слово Мясника, охлажденные", "Колбаски"),
+        ]
+        frame = pd.DataFrame(
+            [{"Категория": "Мясо", "Название": name} for name, _ in cases]
+        )
+
+        result, _ = apply_classifiers(frame, default_rules_path())
+
+        self.assertEqual(result["Подкатегория"].tolist(), [expected for _, expected in cases])
 
 
 if __name__ == "__main__":
