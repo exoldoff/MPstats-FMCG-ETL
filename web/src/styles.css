@@ -50,6 +50,7 @@ p {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
   max-width: 1680px;
   margin: 0 auto 14px;
@@ -85,6 +86,51 @@ small,
 .metric span,
 .current-step small {
   color: #627176;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.author-credit,
+.social-credit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border: 1px solid #d4dde0;
+  border-radius: 8px;
+  color: #274348;
+  background: #fff;
+  text-decoration: none;
+}
+
+.author-credit {
+  gap: 7px;
+  padding: 0 11px;
+  white-space: nowrap;
+}
+
+.author-credit strong {
+  color: #123432;
+}
+
+.social-credit {
+  width: 38px;
+  color: #1f6f68;
+}
+
+.author-credit:hover,
+.author-credit:focus-visible,
+.social-credit:hover,
+.social-credit:focus-visible {
+  border-color: #8fc5be;
+  background: #e4f1ef;
 }
 
 .mode-switch {
@@ -2065,6 +2111,20 @@ th {
 
   .mode-switch {
     width: 100%;
+  }
+
+  .header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+
+  .author-credit {
+    flex: 1 1 190px;
+  }
+
+  .social-credit {
+    flex: 0 0 38px;
   }
 
   .mode-switch button {

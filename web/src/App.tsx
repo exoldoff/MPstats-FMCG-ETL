@@ -9,6 +9,7 @@ import {
   Download,
   FileSpreadsheet,
   FolderSync,
+  Github,
   History,
   ListChecks,
   Pause,
@@ -18,6 +19,7 @@ import {
   RotateCcw,
   Save,
   Search,
+  Send,
   Settings,
   SkipForward,
   Table2,
@@ -1079,20 +1081,29 @@ export function App() {
             <p>Идемпотентный план по категориям, маркетплейсам и месяцам.</p>
           </div>
         </div>
-        <div className="mode-switch" aria-label="Режим запуска">
-          <button className={mode === "historical_backfill" ? "active" : ""} onClick={() => setMode("historical_backfill")}>
-            <History size={17} />
-            Историческая загрузка
-          </button>
-          <button className={mode === "monthly_sync" ? "active" : ""} onClick={() => setMode("monthly_sync")}>
-            <RefreshCcw size={17} />
-            Ежемесячное обновление
+        <div className="header-actions">
+          <a className="author-credit" href="https://github.com/exoldoff" target="_blank" rel="noreferrer" title="Автор проекта на GitHub">
+            <Github size={17} />
+            Made by <strong>@exoldoff</strong>
+          </a>
+          <a className="social-credit" href="https://t.me/exoldoff" target="_blank" rel="noreferrer" aria-label="Telegram @exoldoff" title="Telegram @exoldoff">
+            <Send size={17} />
+          </a>
+          <div className="mode-switch" aria-label="Режим запуска">
+            <button className={mode === "historical_backfill" ? "active" : ""} onClick={() => setMode("historical_backfill")}>
+              <History size={17} />
+              Историческая загрузка
+            </button>
+            <button className={mode === "monthly_sync" ? "active" : ""} onClick={() => setMode("monthly_sync")}>
+              <RefreshCcw size={17} />
+              Ежемесячное обновление
+            </button>
+          </div>
+          <button className="help-button" onClick={() => setInstructionOpen(true)}>
+            <BookOpen size={17} />
+            Инструкция
           </button>
         </div>
-        <button className="help-button" onClick={() => setInstructionOpen(true)}>
-          <BookOpen size={17} />
-          Инструкция
-        </button>
       </header>
 
       {error ? <Notice tone="error" text={error} onClose={() => setError(null)} /> : null}
