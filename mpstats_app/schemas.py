@@ -192,3 +192,16 @@ class ExportPreviewPayload(ProjectPayload):
 class ExportBuildPayload(ExportPreviewPayload):
     output_dir: str | None = None
     confirm_large_export: bool = False
+
+
+class ExportTemplatePayload(ProjectPayload):
+    name: str = Field(min_length=1)
+    category_keys: list[str] = Field(default_factory=list)
+    period_from: str | None = None
+    period_to: str | None = None
+    selected_columns: list[str] = Field(default_factory=list)
+    filters: list[ExportColumnFilterPayload] = Field(default_factory=list)
+    sort_column: str | None = None
+    sort_direction: str = "asc"
+    split_by_category: bool = False
+    output_dir: str | None = None

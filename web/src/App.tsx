@@ -43,6 +43,8 @@ import {
   ExportOptions,
   ExportPayload,
   ExportPreview,
+  ExportTemplate,
+  ExportTemplatePayload,
   PipelineRun,
   PipelineSettings,
   ProductSearch,
@@ -440,6 +442,8 @@ export function App() {
   const [exportSortDirection, setExportSortDirection] = useState<"asc" | "desc">("asc");
   const [exportPreview, setExportPreview] = useState<ExportPreview | null>(null);
   const [exportArtifacts, setExportArtifacts] = useState<ExportArtifact[]>([]);
+  const [exportTemplates, setExportTemplates] = useState<ExportTemplate[]>([]);
+  const [exportTemplateName, setExportTemplateName] = useState("");
   const [exportConfirmLarge, setExportConfirmLarge] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -487,6 +491,7 @@ export function App() {
   useEffect(() => {
     if (tab !== "export") return;
     void loadExportOptions();
+    void loadExportTemplates();
   }, [tab, projectName]);
 
   useEffect(() => {
@@ -706,6 +711,15 @@ export function App() {
     }
   }
 
+  async function loadExportTemplates(targetProjectName = projectName) {
+    try {
+      const response = await api.listExportTemplates(targetProjectName || "mpstats");
+      setExportTemplates(response.templates);
+    } catch (exc) {
+      setError(`Шаблоны выгрузки: ${errorText(exc)}`);
+    }
+  }
+
   async function loadQualityProjects() {
     setQualityLoading(true);
     setQualityError(null);
@@ -767,6 +781,12 @@ export function App() {
     return available.filter((column) => exportSelectedColumns.has(column));
   }
 
+  function normalizedExportFilters(options: ExportOptions): ExportColumnFilter[] {
+    return exportFilters
+      .map((filter) => ({ column: filter.column, value: filter.value.trim(), match_type: filter.match_type }))
+      .filter((filter) => filter.value && options.columns.includes(filter.column));
+  }
+
   function buildExportPayload(limit = 100): ExportPayload {
     if (!exportOptions) {
       throw new Error("Настройки выгрузки ещё не загружены.");
@@ -778,16 +798,13 @@ export function App() {
     if (!exportCategoryKeys.size) {
       throw new Error("Выбери хотя бы одну категорию для выгрузки.");
     }
-    const filters: ExportColumnFilter[] = exportFilters
-      .map((filter) => ({ column: filter.column, value: filter.value.trim(), match_type: filter.match_type }))
-      .filter((filter) => filter.value && exportOptions.columns.includes(filter.column));
     return {
       project_name: projectName || "mpstats",
       category_keys: [...exportCategoryKeys],
       period_from: exportPeriodFrom || null,
       period_to: exportPeriodTo || null,
       selected_columns: selectedColumns,
-      filters,
+      filters: normalizedExportFilters(exportOptions),
       excluded_row_hashes: [...exportExcludedRows],
       sort_column: exportSortColumn,
       sort_direction: exportSortDirection,
@@ -797,6 +814,90 @@ export function App() {
       limit,
       offset: 0
     };
+  }
+
+  function buildExportTemplatePayload(name: string): ExportTemplatePayload {
+    if (!exportOptions) {
+      throw new Error("Настройки выгрузки ещё не загружены.");
+    }
+    const selectedColumns = selectedExportColumns();
+    if (!selectedColumns.length) {
+      throw new Error("Выбери хотя бы одну колонку для шаблона.");
+    }
+    if (!exportCategoryKeys.size) {
+      throw new Error("Выбери хотя бы одну категорию для шаблона.");
+    }
+    return {
+      name: name.trim(),
+      project_name: projectName || "mpstats",
+      category_keys: [...exportCategoryKeys],
+      period_from: exportPeriodFrom || null,
+      period_to: exportPeriodTo || null,
+      selected_columns: selectedColumns,
+      filters: normalizedExportFilters(exportOptions),
+      sort_column: exportSortColumn,
+      sort_direction: exportSortDirection,
+      split_by_category: exportSplitByCategory,
+      output_dir: exportOutputDir || null
+    };
+  }
+
+  function payloadFromExportTemplate(template: ExportTemplate, limit = 100): ExportPayload {
+    return {
+      project_name: template.project_name,
+      category_keys: template.category_keys,
+      period_from: template.period_from ?? null,
+      period_to: template.period_to ?? null,
+      selected_columns: template.selected_columns,
+      filters: template.filters,
+      excluded_row_hashes: [],
+      sort_column: template.sort_column ?? null,
+      sort_direction: template.sort_direction,
+      split_by_category: template.split_by_category,
+      output_dir: template.output_dir ?? null,
+      confirm_large_export: false,
+      limit,
+      offset: 0
+    };
+  }
+
+  function applyExportTemplate(template: ExportTemplate) {
+    const availableCategories = new Set(exportOptions?.categories.map((category) => category.category_key) ?? template.category_keys);
+    const availableColumns = new Set(exportOptions?.columns ?? template.selected_columns);
+    const categoryKeys = template.category_keys.filter((key) => availableCategories.has(key));
+    const columns = template.selected_columns.filter((column) => availableColumns.has(column));
+    setExportCategoryKeys(new Set(categoryKeys.length ? categoryKeys : template.category_keys));
+    setExportSelectedColumns(new Set(columns.length ? columns : template.selected_columns));
+    setExportPeriodFrom(template.period_from ?? "");
+    setExportPeriodTo(template.period_to ?? "");
+    setExportOutputDir(template.output_dir ?? "");
+    setExportSplitByCategory(Boolean(template.split_by_category));
+    setExportFilters(template.filters.map((filter, index) => ({ ...filter, id: `template-filter-${template.id}-${index}` })));
+    setExportSortColumn(template.sort_column ?? null);
+    setExportSortDirection(template.sort_direction === "desc" ? "desc" : "asc");
+    setExportExcludedRows(new Set());
+    setExportConfirmLarge(false);
+    setExportPreview(null);
+    setExportArtifacts([]);
+    setExportTemplateName(template.name);
+  }
+
+  async function saveExportTemplate() {
+    const name = exportTemplateName.trim();
+    if (!name) {
+      throw new Error("Введи название шаблона.");
+    }
+    const saved = await api.saveExportTemplate(buildExportTemplatePayload(name));
+    setExportTemplateName(saved.name);
+    await loadExportTemplates(saved.project_name);
+    return saved;
+  }
+
+  async function deleteExportTemplate(template: ExportTemplate) {
+    const response = await api.deleteExportTemplate(template.id, template.project_name);
+    await loadExportTemplates(template.project_name);
+    if (exportTemplateName === template.name) setExportTemplateName("");
+    return response;
   }
 
   async function loadExportPreview() {
@@ -810,6 +911,14 @@ export function App() {
     const response = await api.buildExport(buildExportPayload(100));
     setExportArtifacts(response.artifacts);
     setExportPreview((prev) => (prev ? { ...prev, total: response.total, estimated_files: response.estimated_files, warnings: response.warnings } : prev));
+    return response;
+  }
+
+  async function buildExportFromTemplate(template: ExportTemplate) {
+    applyExportTemplate(template);
+    const response = await api.buildExport(payloadFromExportTemplate(template, 100));
+    setExportArtifacts(response.artifacts);
+    setExportPreview(null);
     return response;
   }
 
@@ -1529,8 +1638,19 @@ export function App() {
               sortDirection={exportSortDirection}
               preview={exportPreview}
               artifacts={exportArtifacts}
+              templates={exportTemplates}
+              templateName={exportTemplateName}
               confirmLarge={exportConfirmLarge}
               busy={Boolean(busy)}
+              onTemplateNameChange={setExportTemplateName}
+              onSaveTemplate={() => void runAction("Сохранение шаблона выгрузки", saveExportTemplate)}
+              onApplyTemplate={applyExportTemplate}
+              onBuildTemplate={(template) => void runAction("Выгрузка по шаблону", () => buildExportFromTemplate(template))}
+              onDeleteTemplate={(template) => {
+                if (window.confirm(`Удалить шаблон «${template.name}»?`)) {
+                  void runAction("Удаление шаблона выгрузки", () => deleteExportTemplate(template));
+                }
+              }}
               onReloadOptions={loadExportOptions}
               onToggleCategory={toggleExportCategory}
               onToggleAllCategories={toggleAllExportCategories}
@@ -2120,8 +2240,15 @@ function ExportWorkspace(props: {
   sortDirection: "asc" | "desc";
   preview: ExportPreview | null;
   artifacts: ExportArtifact[];
+  templates: ExportTemplate[];
+  templateName: string;
   confirmLarge: boolean;
   busy: boolean;
+  onTemplateNameChange: (value: string) => void;
+  onSaveTemplate: () => void;
+  onApplyTemplate: (template: ExportTemplate) => void;
+  onBuildTemplate: (template: ExportTemplate) => void;
+  onDeleteTemplate: (template: ExportTemplate) => void;
   onReloadOptions: () => void;
   onToggleCategory: (id: string) => void;
   onToggleAllCategories: () => void;
@@ -2154,6 +2281,36 @@ function ExportWorkspace(props: {
         meta={props.preview ? `${props.preview.total} строк` : "предпросмотр не собран"}
         hint="XLSX строится из сохранённого куба. Исключение строк действует только на текущую выгрузку."
       />
+
+      <div className="export-templates-panel">
+        <div className="template-save-row">
+          <label>
+            <FieldLabel text="Шаблон" hint="Сохраняет текущий период, категории, колонки, фильтры, сортировку, папку и режим разбиения." />
+            <input value={props.templateName} onChange={(event) => props.onTemplateNameChange(event.target.value)} placeholder="Например: Ежемесячный отчёт" />
+          </label>
+          <button className="primary-inline-button" disabled={props.busy || !options || !props.templateName.trim()} onClick={props.onSaveTemplate}>
+            <Save size={17} />
+            Сохранить
+          </button>
+        </div>
+        {props.templates.length ? (
+          <div className="template-list">
+            {props.templates.map((template) => (
+              <div className="template-row" key={template.id}>
+                <span>
+                  <strong>{template.name}</strong>
+                  <small>{template.category_keys.length} категорий · {template.selected_columns.length} колонок · {template.period_from || "с начала"} - {template.period_to || "по последний"}</small>
+                </span>
+                <div className="table-actions">
+                  <button className="tiny-button" disabled={props.busy} onClick={() => props.onApplyTemplate(template)}>Применить</button>
+                  <button className="tiny-button" disabled={props.busy} onClick={() => props.onBuildTemplate(template)}>XLSX</button>
+                  <button className="tiny-button danger-inline" disabled={props.busy} onClick={() => props.onDeleteTemplate(template)}>Удалить</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <span className="muted">Шаблонов пока нет. Настрой выгрузку и сохрани её здесь.</span>}
+      </div>
 
       <div className="export-settings">
         <div className="export-settings-main">

@@ -506,6 +506,32 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(excluded_preview.status_code, 200)
                 self.assertEqual(excluded_preview.json()["total"], 1)
 
+                template = client.post(
+                    "/api/exports/templates",
+                    json={
+                        **{key: value for key, value in preview_payload.items() if key not in {"limit", "offset", "excluded_row_hashes"}},
+                        "name": "Ежемесячный лимон",
+                        "output_dir": str(root / "template-exports"),
+                    },
+                )
+                self.assertEqual(template.status_code, 200)
+                template_payload = template.json()
+                self.assertEqual(template_payload["name"], "Ежемесячный лимон")
+                self.assertEqual(template_payload["project_name"], "unit")
+                self.assertEqual(template_payload["category_keys"], ["lemon-oz"])
+                self.assertEqual(template_payload["selected_columns"], ["SKU", "Название", "Бренд", "Продажи, шт"])
+
+                templates = client.get("/api/exports/templates", params={"project_name": "unit"})
+                self.assertEqual(templates.status_code, 200)
+                self.assertEqual([row["name"] for row in templates.json()["templates"]], ["Ежемесячный лимон"])
+
+                deleted_template = client.delete(
+                    f"/api/exports/templates/{template_payload['id']}",
+                    params={"project_name": "unit"},
+                )
+                self.assertEqual(deleted_template.status_code, 200)
+                self.assertEqual(client.get("/api/exports/templates", params={"project_name": "unit"}).json()["templates"], [])
+
                 output_dir = root / "exports"
                 built = client.post(
                     "/api/exports/build",

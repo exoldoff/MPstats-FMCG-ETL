@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from mpstats_app.api.dependencies import get_export_service
-from mpstats_app.schemas import ExportBuildPayload, ExportPreviewPayload
+from mpstats_app.schemas import ExportBuildPayload, ExportPreviewPayload, ExportTemplatePayload
 from mpstats_app.services.export_service import ExportService
 
 
@@ -24,6 +24,45 @@ def export_options(
     export_service: ExportService = Depends(get_export_service),
 ) -> dict[str, object]:
     return _handle(lambda: export_service.options(project_name=project_name))
+
+
+@router.get("/templates")
+def export_templates(
+    project_name: str = "mpstats",
+    export_service: ExportService = Depends(get_export_service),
+) -> dict[str, object]:
+    return _handle(lambda: export_service.list_templates(project_name=project_name))
+
+
+@router.post("/templates")
+def save_export_template(
+    payload: ExportTemplatePayload,
+    export_service: ExportService = Depends(get_export_service),
+) -> dict[str, object]:
+    return _handle(
+        lambda: export_service.save_template(
+            name=payload.name,
+            project_name=payload.project_name,
+            category_keys=payload.category_keys,
+            period_from=payload.period_from,
+            period_to=payload.period_to,
+            selected_columns=payload.selected_columns,
+            filters=[item.model_dump() for item in payload.filters],
+            sort_column=payload.sort_column,
+            sort_direction=payload.sort_direction,
+            split_by_category=payload.split_by_category,
+            output_dir=payload.output_dir,
+        )
+    )
+
+
+@router.delete("/templates/{template_id}")
+def delete_export_template(
+    template_id: str,
+    project_name: str = "mpstats",
+    export_service: ExportService = Depends(get_export_service),
+) -> dict[str, object]:
+    return _handle(lambda: export_service.delete_template(template_id=template_id, project_name=project_name))
 
 
 @router.post("/preview")

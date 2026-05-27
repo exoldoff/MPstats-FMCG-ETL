@@ -1489,9 +1489,70 @@ a.ghost-button {
   gap: 14px;
 }
 
+.export-templates-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.template-save-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.template-save-row label,
+.template-save-row input {
+  min-width: 0;
+}
+
+.template-list {
+  display: grid;
+  gap: 8px;
+}
+
+.template-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #e1e8ea;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.template-row span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.template-row strong,
+.template-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-row small {
+  color: #627176;
+}
+
+.template-row .table-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
 .export-settings {
   display: grid;
-  grid-template-columns: minmax(300px, 0.95fr) minmax(420px, 1.35fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: 12px;
 }
 
@@ -2220,6 +2281,7 @@ th {
   .quality-toolbar,
   .quality-status-card,
   .project-create-panel,
+  .template-save-row,
   .external-file-grid,
   .two-cols,
   .mini-actions,
@@ -2235,6 +2297,15 @@ th {
   .filter-condition-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .template-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .template-row .table-actions {
+    justify-content: flex-start;
   }
 
   .mode-switch {

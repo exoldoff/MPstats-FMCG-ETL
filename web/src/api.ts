@@ -364,6 +364,25 @@ export type ExportPayload = {
   confirm_large_export?: boolean;
 };
 
+export type ExportTemplate = {
+  id: string;
+  name: string;
+  project_name: string;
+  category_keys: string[];
+  period_from?: string | null;
+  period_to?: string | null;
+  selected_columns: string[];
+  filters: ExportColumnFilter[];
+  sort_column?: string | null;
+  sort_direction: "asc" | "desc" | string;
+  split_by_category: boolean;
+  output_dir?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ExportTemplatePayload = Omit<ExportTemplate, "id" | "created_at" | "updated_at">;
+
 export type FilePreview = {
   file: string;
   columns: string[];
@@ -488,6 +507,15 @@ export const api = {
   reclassifyCube: (runId: string, wait = false) =>
     request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/reclassify-cube`, { method: "POST", body: JSON.stringify({ wait }) }),
   getExportOptions: (projectName: string) => request<ExportOptions>(`/api/exports/options?project_name=${encodeURIComponent(projectName)}`),
+  listExportTemplates: (projectName: string) =>
+    request<{ templates: ExportTemplate[] }>(`/api/exports/templates?project_name=${encodeURIComponent(projectName)}`),
+  saveExportTemplate: (payload: ExportTemplatePayload) =>
+    request<ExportTemplate>("/api/exports/templates", { method: "POST", body: JSON.stringify(payload) }),
+  deleteExportTemplate: (templateId: string, projectName: string) =>
+    request<{ template_id: string; project_name: string; deleted: boolean }>(
+      `/api/exports/templates/${encodeURIComponent(templateId)}?project_name=${encodeURIComponent(projectName)}`,
+      { method: "DELETE" }
+    ),
   previewExport: (payload: ExportPayload) =>
     request<ExportPreview>("/api/exports/preview", { method: "POST", body: JSON.stringify(payload) }),
   buildExport: (payload: ExportPayload) =>

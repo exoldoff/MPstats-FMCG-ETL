@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, date
+import json
 import math
 from pathlib import Path
 import re
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -18,6 +20,7 @@ EXCEL_MAX_DATA_ROWS = 1_048_575
 EXPORT_BATCH_SIZE = 50_000
 LARGE_EXPORT_FILE_WARNING = 10
 EXPORT_MATCH_TYPES = {"contains", "not_contains", "equals", "startswith", "gt", "gte", "lt", "lte"}
+EXPORT_TEMPLATES_SETTING = "export_templates_json"
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,93 @@ class ExportService:
             }
         )
         return payload
+
+    def list_templates(self, *, project_name: str) -> dict[str, Any]:
+        project = _clean_project_name(project_name)
+        templates = [
+            template
+            for template in self._read_templates()
+            if str(template.get("project_name") or "") == project
+        ]
+        return {"templates": sorted(templates, key=lambda item: str(item.get("updated_at") or ""), reverse=True)}
+
+    def save_template(
+        self,
+        *,
+        name: str,
+        project_name: str,
+        category_keys: list[str],
+        period_from: str | None,
+        period_to: str | None,
+        selected_columns: list[str],
+        filters: list[dict[str, str]],
+        sort_column: str | None,
+        sort_direction: str,
+        split_by_category: bool,
+        output_dir: str | None,
+    ) -> dict[str, Any]:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Название шаблона не заполнено.")
+        spec = self._spec(
+            project_name=project_name,
+            category_keys=category_keys,
+            period_from=period_from,
+            period_to=period_to,
+            selected_columns=selected_columns,
+            filters=filters,
+            excluded_row_hashes=[],
+            sort_column=sort_column,
+            sort_direction=sort_direction,
+            split_by_category=split_by_category,
+        )
+        if not spec.category_keys:
+            raise ValueError("Выбери хотя бы одну категорию для шаблона.")
+        now = datetime.now().isoformat(timespec="seconds")
+        templates = self._read_templates()
+        existing = next(
+            (
+                template
+                for template in templates
+                if str(template.get("project_name") or "") == spec.project_name
+                and str(template.get("name") or "").casefold() == clean_name.casefold()
+            ),
+            None,
+        )
+        template = {
+            "id": str(existing.get("id")) if existing else uuid4().hex,
+            "name": clean_name,
+            "project_name": spec.project_name,
+            "category_keys": spec.category_keys,
+            "period_from": spec.period_from,
+            "period_to": spec.period_to,
+            "selected_columns": spec.selected_columns,
+            "filters": spec.filters,
+            "sort_column": spec.sort_column,
+            "sort_direction": spec.sort_direction,
+            "split_by_category": spec.split_by_category,
+            "output_dir": (output_dir or "").strip() or None,
+            "created_at": str(existing.get("created_at")) if existing else now,
+            "updated_at": now,
+        }
+        templates = [item for item in templates if str(item.get("id") or "") != template["id"]]
+        templates.append(template)
+        self._write_templates(templates)
+        return template
+
+    def delete_template(self, *, template_id: str, project_name: str) -> dict[str, Any]:
+        clean_id = template_id.strip()
+        project = _clean_project_name(project_name)
+        templates = self._read_templates()
+        kept = [
+            template
+            for template in templates
+            if not (str(template.get("id") or "") == clean_id and str(template.get("project_name") or "") == project)
+        ]
+        if len(kept) == len(templates):
+            raise ValueError("Шаблон выгрузки не найден.")
+        self._write_templates(kept)
+        return {"template_id": clean_id, "project_name": project, "deleted": True}
 
     def preview(
         self,
@@ -408,6 +498,25 @@ class ExportService:
         if estimated_files <= 1:
             return []
         return [f"Выгрузка будет разбита на {estimated_files} файлов."]
+
+    def _read_templates(self) -> list[dict[str, Any]]:
+        raw = self.repository.get_setting(EXPORT_TEMPLATES_SETTING)
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        templates = payload.get("templates") if isinstance(payload, dict) else payload
+        if not isinstance(templates, list):
+            return []
+        return [item for item in templates if isinstance(item, dict)]
+
+    def _write_templates(self, templates: list[dict[str, Any]]) -> None:
+        self.repository.set_setting(
+            EXPORT_TEMPLATES_SETTING,
+            json.dumps({"version": 1, "templates": templates}, ensure_ascii=False),
+        )
 
 
 def _clean_project_name(value: str) -> str:
