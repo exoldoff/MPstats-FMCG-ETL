@@ -58,6 +58,7 @@ import {
 
 type Mode = "historical_backfill" | "monthly_sync";
 type Tab = "projects" | "categories" | "catalog" | "plan" | "files" | "cube" | "export" | "classifier" | "quality";
+type DataTab = "files" | "cube" | "export" | "quality";
 type FileKindFilter = "all" | "raw" | "processed" | "classified" | "export" | "other";
 
 const defaultPipelineSettings: PipelineSettings = {
@@ -169,15 +170,15 @@ const fileKindInfo: Record<Exclude<FileKindFilter, "all">, { label: string; hint
   },
   classified: {
     label: "Classified",
-    hint: "Processed-файлы после правил из вкладки Классификатор. Именно они сохраняются в БД / Куб."
+    hint: "Processed-файлы после правил из вкладки Классификатор. Именно они сохраняются в Данные -> Куб."
   },
   export: {
     label: "Выгрузки",
-    hint: "Готовые XLSX из вкладки Выгрузка. Это файлы для передачи, анализа или ручной работы."
+    hint: "Готовые XLSX из Данные -> Выгрузка. Это файлы для передачи, анализа или ручной работы."
   },
   other: {
     label: "Прочее",
-    hint: "Вспомогательные файлы проекта, которые не относятся к основному пути raw -> processed -> classified -> БД."
+    hint: "Вспомогательные файлы проекта, которые не относятся к основному пути raw -> processed -> classified -> куб."
   }
 };
 
@@ -377,6 +378,10 @@ function categoryFbsLabel(category: Category) {
 
 function runTypeLabel(type?: string) {
   return type === "monthly_sync" ? "Ежемесячное обновление" : "Историческая загрузка";
+}
+
+function isDataTab(tab: Tab): tab is DataTab {
+  return tab === "files" || tab === "cube" || tab === "export" || tab === "quality";
 }
 
 export function App() {
@@ -1290,17 +1295,23 @@ export function App() {
         </aside>
 
         <section className="center-stage">
-	          <nav className="tabs">
-	            <button className={tab === "projects" ? "active" : ""} title="Список проектов, выбор и удаление." onClick={() => { setTab("projects"); void loadProjects(); }}>Проекты</button>
-	            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
+          <nav className="tabs main-tabs" aria-label="Основные разделы">
+            <button className={tab === "projects" ? "active" : ""} title="Список проектов, выбор и удаление." onClick={() => { setTab("projects"); void loadProjects(); }}>Проекты</button>
+            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
             <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => setTab("categories")}>Категории</button>
-            <button className={tab === "catalog" ? "active" : ""} title="Редактор CSV-справочника категорий." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>Справочник</button>
-            <button className={tab === "files" ? "active" : ""} onClick={() => { setTab("files"); void refreshFilesAndCube(); }}>Файлы</button>
-            <button className={tab === "cube" ? "active" : ""} onClick={() => setTab("cube")}>БД / Куб</button>
-            <button className={tab === "export" ? "active" : ""} title="Подготовить XLSX из сохранённого куба." onClick={() => setTab("export")}>Выгрузка</button>
-            <button className={tab === "quality" ? "active" : ""} title="Проверить итоговые CSV перед работой с отчётом." onClick={() => setTab("quality")}>Качество данных</button>
+            <button className={isDataTab(tab) ? "active" : ""} title="Куб, файлы, выгрузка и проверка качества." onClick={() => setTab("cube")}>Данные</button>
             <button className={tab === "classifier" ? "active" : ""} title="Правила классификатора без ручного JSON." onClick={() => setTab("classifier")}>Классификатор</button>
           </nav>
+
+          {isDataTab(tab) ? (
+            <DataSubnav
+              activeTab={tab}
+              onSelect={(nextTab) => {
+                setTab(nextTab);
+                if (nextTab === "files") void refreshFilesAndCube();
+              }}
+            />
+          ) : null}
 
 	          {tab === "projects" ? (
 	            <ProjectsWorkspace
@@ -1406,7 +1417,7 @@ export function App() {
                 icon={<Archive />}
                 title="Файлы"
                 meta={`${filteredFiles.length}/${files.length} файлов`}
-                hint="Рабочий путь web-app: raw -> processed -> classified -> БД / Куб -> XLSX выгрузка. Legacy merged-файлы здесь скрыты, куб теперь хранится в БД."
+                hint="Рабочий путь web-app: raw -> processed -> classified -> куб -> XLSX выгрузка. Legacy merged-файлы здесь скрыты, куб теперь хранится в БД."
               />
               <div className="toolbar wrap file-kind-toolbar">
                 {fileKindFilters.map((filter) => (
@@ -1429,7 +1440,7 @@ export function App() {
 
           {tab === "cube" ? (
             <section className="panel stage-panel">
-              <SectionTitle icon={<Database />} title="БД / Куб" meta={`${cube.length} срезов`} />
+              <SectionTitle icon={<Database />} title="Куб" meta={`${cube.length} срезов`} />
               <div className="toolbar">
                 <label className="search-field">
                   <Search size={17} />
@@ -1691,6 +1702,25 @@ function Toggle(props: { label: string; hint?: string; checked: boolean; onChang
       <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
       {props.hint ? <FieldLabel text={props.label} hint={props.hint} /> : props.label}
     </label>
+  );
+}
+
+function DataSubnav(props: { activeTab: DataTab; onSelect: (tab: DataTab) => void }) {
+  const items: Array<{ tab: DataTab; label: string; icon: ReactNode }> = [
+    { tab: "cube", label: "Куб", icon: <Database size={16} /> },
+    { tab: "files", label: "Файлы", icon: <Archive size={16} /> },
+    { tab: "export", label: "Выгрузка", icon: <Download size={16} /> },
+    { tab: "quality", label: "Качество", icon: <CheckCircle2 size={16} /> }
+  ];
+  return (
+    <nav className="data-subnav" aria-label="Данные">
+      {items.map((item) => (
+        <button key={item.tab} className={props.activeTab === item.tab ? "active" : ""} onClick={() => props.onSelect(item.tab)}>
+          {item.icon}
+          {item.label}
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -2291,7 +2321,7 @@ function DataQualityWorkspace(props: {
     <section className="panel stage-panel quality-panel">
       <SectionTitle
         icon={<CheckCircle2 />}
-        title="Качество данных"
+        title="Качество"
         meta={report ? `${formatNumber(report.total_rows)} строк` : "проверка не запускалась"}
         hint="Проверка отвечает на главный вопрос: можно ли доверять итоговому CSV перед анализом или выгрузкой."
       />
@@ -2880,7 +2910,7 @@ function ProductInstructionModal(props: { onClose: () => void }) {
         <div className="modal-head">
           <div>
             <h2 id="product-instruction-title">Инструкция по MPStats Workflow</h2>
-            <p>Коротко: выбираешь что скачать, запускаешь план, проверяешь БД и при необходимости настраиваешь классификатор.</p>
+            <p>Коротко: выбираешь что скачать, запускаешь план, проверяешь раздел «Данные» и при необходимости настраиваешь классификатор.</p>
           </div>
           <div className="result-actions">
             <a className="ghost-button" href="/docs/USER_GUIDE.md" target="_blank" rel="noreferrer">
@@ -2896,15 +2926,15 @@ function ProductInstructionModal(props: { onClose: () => void }) {
           </section>
           <section className="instruction-section">
             <h3>2. Справочник</h3>
-            <p>Во вкладке «Справочник» лежит список категорий и путей MPStats. Если нужна новая категория, добавь строку, укажи маркетплейс, путь и фильтр, затем нажми «Сохранить CSV». После этого категория появится во вкладке «Категории».</p>
+            <p>Справочник лежит в блоке «Правила и справочник» слева. Если нужна новая категория, добавь строку, укажи маркетплейс, путь и фильтр, затем нажми «Сохранить CSV». После этого категория появится в разделе «Категории».</p>
           </section>
           <section className="instruction-section">
             <h3>3. Загрузка</h3>
             <p>Для старых периодов выбери «Историческая загрузка», отметь категории и нажми «Создать план». Потом проверь вкладку «Умный план» и нажми «Запустить». Для следующего месяца используй режим «Ежемесячное обновление» и кнопку синхронизации.</p>
           </section>
           <section className="instruction-section">
-            <h3>4. БД / Куб</h3>
-            <p>После обработки каждая задача сохраняется в DuckDB. Во вкладке «БД / Куб» видно, какие месячные срезы уже сохранены, можно открыть предпросмотр первых строк и найти товар по SKU, названию или бренду.</p>
+            <h3>4. Данные → Куб</h3>
+            <p>После обработки каждая задача сохраняется в DuckDB. В разделе «Данные» открой «Куб»: там видно, какие месячные срезы уже сохранены, можно открыть предпросмотр первых строк и найти товар по SKU, названию или бренду.</p>
           </section>
           <section className="instruction-section">
             <h3>5. Классификатор</h3>

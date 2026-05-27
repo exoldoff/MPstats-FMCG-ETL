@@ -430,6 +430,51 @@ select {
   overflow-x: auto;
 }
 
+.main-tabs {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.main-tabs button {
+  min-width: max-content;
+  padding: 0 14px;
+  font-size: 15px;
+}
+
+.data-subnav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 10px;
+  padding: 4px;
+  border: 1px solid #d4dde0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.data-subnav button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 11px;
+  color: #415257;
+  background: transparent;
+}
+
+.data-subnav button.active {
+  color: #123432;
+  background: #e4f1ef;
+  font-weight: 700;
+}
+
+.data-subnav svg {
+  color: #1f6f68;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -2147,6 +2192,7 @@ th {
 
   .app-header,
   .toolbar,
+  .data-subnav,
   .right-rail {
     align-items: stretch;
     flex-direction: column;
