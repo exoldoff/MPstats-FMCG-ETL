@@ -12,6 +12,20 @@ from pipeline.repositories.file_repository import read_csv_auto, write_semicolon
 
 SERVICE_COLUMNS_TO_DROP = ["Вес, кг сырой", "Вес аномалия", "Вес причина", "Объем, кг"]
 EXCEL_SUFFIXES = {".xlsx"}
+MONTH_LABELS = {
+    1: "янв.",
+    2: "фев.",
+    3: "мар.",
+    4: "апр.",
+    5: "май",
+    6: "июн.",
+    7: "июл.",
+    8: "авг.",
+    9: "сен.",
+    10: "окт.",
+    11: "ноя.",
+    12: "дек.",
+}
 
 
 def read_classification_input(input_file: str | Path) -> pd.DataFrame:
@@ -38,6 +52,7 @@ def postprocess_classified(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], d
     dropped_columns = [column for column in SERVICE_COLUMNS_TO_DROP if column in out.columns]
     if dropped_columns:
         out = out.drop(columns=dropped_columns)
+    out = add_month_column(out)
 
     rename_map: dict[str, str] = {}
     if "SKU" in out.columns:
@@ -47,6 +62,18 @@ def postprocess_classified(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], d
     if rename_map:
         out = out.rename(columns=rename_map)
     return out, dropped_columns, rename_map
+
+
+def add_month_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "Дата" not in df.columns:
+        return df
+    out = df.copy()
+    parsed_month = pd.to_datetime(out["Дата"], errors="coerce", dayfirst=True).dt.month
+    month_values = parsed_month.map(lambda value: MONTH_LABELS.get(int(value)) if pd.notna(value) else pd.NA)
+    if "месяц" in out.columns:
+        out = out.drop(columns=["месяц"])
+    out.insert(out.columns.get_loc("Дата") + 1, "месяц", month_values)
+    return out
 
 
 def classify_dataframe(

@@ -8,7 +8,7 @@ import unittest
 import pandas as pd
 
 from classifiers.engine import apply_classifiers, default_rules_path
-from pipeline.repositories.file_repository import write_semicolon_csv
+from pipeline.repositories.file_repository import read_semicolon_csv, write_semicolon_csv
 from pipeline.services.classification_service import classify_file
 from pipeline.services.enrich_service import (
     extract_category_from_filename,
@@ -103,9 +103,14 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(step.ok, 1)
             self.assertTrue(output_file.exists())
             self.assertEqual(report["applied_rows"].sum(), 2)
+            self.assertIn("месяц", result.columns)
+            self.assertEqual(result["месяц"].tolist(), ["янв.", "янв."])
             self.assertEqual(result.iloc[0]["Подкатегория"], "Мясо")
             self.assertEqual(result.iloc[1]["Подкатегория"], "Прочее")
             self.assertEqual(result.iloc[0]["Тип"], "Прочие")
+            saved = read_semicolon_csv(output_file)
+            self.assertIn("месяц", saved.columns)
+            self.assertEqual(saved["месяц"].tolist(), ["янв.", "янв."])
 
     def test_otherwise_rule_never_overwrites_filled_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
