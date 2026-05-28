@@ -494,6 +494,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertIn("Название", options_payload["columns"])
                 self.assertNotIn("__row_hash", options_payload["columns"])
                 self.assertEqual({row["category_key"] for row in options_payload["categories"]}, {"lemon-oz", "soap-wb"})
+                self.assertEqual(Path(options_payload["default_output_dir"]), (root / "data" / "projects" / "unit" / "exports").resolve())
 
                 preview_payload = {
                     "project_name": "unit",
@@ -568,7 +569,9 @@ class WebApiTest(unittest.TestCase):
                 built_payload = built.json()
                 self.assertEqual(built_payload["total"], 1)
                 self.assertEqual(len(built_payload["artifacts"]), 1)
+                self.assertEqual(Path(built_payload["output_dir"]), (output_dir / "unit").resolve())
                 xlsx_path = Path(built_payload["artifacts"][0]["path"])
+                self.assertEqual(xlsx_path.parent, (output_dir / "unit").resolve())
                 self.assertTrue(xlsx_path.exists())
 
                 from openpyxl import load_workbook

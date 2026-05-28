@@ -449,6 +449,7 @@ export function App() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [instructionOpen, setInstructionOpen] = useState(false);
+  const exportDefaultOutputDirRef = useRef("");
   const previousRunStatusRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -695,7 +696,15 @@ export function App() {
       setExportOptions(response);
       setExportPeriodFrom((prev) => prev || response.period_from || "");
       setExportPeriodTo((prev) => prev || response.period_to || "");
-      setExportOutputDir((prev) => prev || response.default_output_dir || "");
+      const previousDefault = exportDefaultOutputDirRef.current;
+      exportDefaultOutputDirRef.current = response.default_output_dir || "";
+      setExportOutputDir((prev) => {
+        const currentValue = prev.trim();
+        if (!currentValue || currentValue === previousDefault) {
+          return response.default_output_dir || "";
+        }
+        return prev;
+      });
       setExportCategoryKeys((prev) => {
         const available = new Set(response.categories.map((category) => category.category_key));
         const retained = [...prev].filter((key) => available.has(key));

@@ -270,14 +270,17 @@ class ExportService:
         }
 
     def resolve_output_dir(self, output_dir: str | None, project_name: str) -> Path:
+        project = _clean_project_name(project_name)
         raw = (output_dir or "").strip()
-        path = Path(raw).expanduser() if raw else self.default_output_dir(project_name)
+        path = Path(raw).expanduser() if raw else self.default_output_dir(project)
         if not path.is_absolute():
             path = self.settings.project_root / path
+        if raw:
+            path = _with_project_segment(path, project)
         return path.resolve()
 
     def default_output_dir(self, project_name: str) -> Path:
-        return (self.settings.project_root / "data" / "projects" / project_name / "exports").resolve()
+        return (self.settings.project_root / "data" / "projects" / _safe_segment(project_name) / "exports").resolve()
 
     def resolve_export_file(self, file_path: str) -> Path:
         target = Path(file_path).expanduser().resolve()
@@ -521,6 +524,18 @@ class ExportService:
 
 def _clean_project_name(value: str) -> str:
     return value.strip() or "mpstats"
+
+
+def _safe_segment(value: str) -> str:
+    segment = re.sub(r"[^\w_.-]+", "_", value.strip(), flags=re.UNICODE)
+    return segment.strip("._") or "mpstats"
+
+
+def _with_project_segment(path: Path, project_name: str) -> Path:
+    project_segment = _safe_segment(project_name)
+    if project_segment in path.parts or project_name in path.parts:
+        return path
+    return path / project_segment
 
 
 def _parse_filter_number(value: str, column: str) -> float:
