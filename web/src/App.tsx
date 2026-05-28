@@ -2622,14 +2622,14 @@ function QualityReportView(props: { report: QualityReport }) {
         <QualityMetric
           label="Дубли"
           value={report.metrics.duplicates.checked ? formatNumber(report.metrics.duplicates.duplicate_rows) : "пропущено"}
-          detail={report.metrics.duplicates.identifier_column || "нет ID"}
+          detail={report.metrics.duplicates.checked ? "полная строка" : "нет колонок"}
         />
-        <QualityMetric label="Пропуски" value={formatNumber(report.metrics.empty_key_fields.rows_with_empty)} detail="ключевые поля" />
+        <QualityMetric label="Пустые поля" value={formatNumber(report.metrics.empty_key_fields.rows_with_empty)} detail="ключевые поля" />
       </div>
 
       {report.skipped_checks.length ? (
         <div className="quality-skipped">
-          <strong>Пропущенные проверки</strong>
+          <strong>Не проверялось</strong>
           {report.skipped_checks.map((item) => (
             <span key={`${item.check}-${item.reason}`}>{item.check}: {item.reason}</span>
           ))}
@@ -2686,7 +2686,7 @@ function QualityExamples(props: { report: QualityReport }) {
     { id: "unclassified", title: "Неклассифицированные товары", rows: props.report.examples.unclassified },
     { id: "missing-weight", title: "Товары без веса/объёма", rows: props.report.examples.missing_weight_volume },
     { id: "anomalies", title: "Аномальный вес/объём", rows: props.report.examples.anomalies },
-    { id: "duplicates", title: "Дубли", rows: props.report.examples.duplicates }
+    { id: "duplicates", title: "Полные дубли строк", rows: props.report.examples.duplicates }
   ];
   return (
     <div className="quality-examples">

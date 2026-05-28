@@ -245,7 +245,7 @@ export type QualityReport = {
     weight_volume: { columns: string[]; parsed_count: number; missing_count: number; coverage_share: number; missing_share: number };
     anomalies: { columns: string[]; count: number; zero_or_negative: number; too_large: number; suspicious: number };
     classification: { columns: string[]; classified_count: number; unclassified_count: number; coverage_share: number; unclassified_share: number };
-    duplicates: { checked: boolean; identifier_column?: string | null; duplicate_rows: number; duplicate_keys: number; share: number };
+    duplicates: { checked: boolean; identifier_column?: string | null; columns?: string[]; duplicate_rows: number; duplicate_keys: number; share: number };
   };
   problems: QualityProblem[];
   skipped_checks: QualitySkippedCheck[];

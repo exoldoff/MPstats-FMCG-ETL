@@ -124,7 +124,7 @@ class DataQualityService:
                 "unclassified": self._examples(df, classification_metrics.get("unclassified_mask"), classification_metrics.get("columns", [])),
                 "missing_weight_volume": self._examples(df, weight_metrics.get("missing_mask"), weight_metrics.get("columns", [])),
                 "anomalies": self._examples(df, anomaly_metrics.get("anomaly_mask"), anomaly_metrics.get("columns", [])),
-                "duplicates": self._examples(df, duplicate_metrics.get("duplicate_mask"), [duplicate_metrics.get("identifier_column")]),
+                "duplicates": self._examples(df, duplicate_metrics.get("duplicate_mask"), duplicate_metrics.get("columns", [])),
             },
             "warnings": warnings,
         }
@@ -151,7 +151,7 @@ class DataQualityService:
         fields: list[dict[str, object]] = []
         for label, columns, comment in checks:
             if not columns:
-                skipped.append(SkippedCheck(check=label, reason="Проверка пропущена — колонка не найдена."))
+                skipped.append(SkippedCheck(check=label, reason="Не проверялось: колонка не найдена."))
                 continue
             column = columns[0]
             mask = _empty_mask(df[column])
@@ -177,7 +177,7 @@ class DataQualityService:
     ) -> dict[str, object]:
         columns = _present_columns(df, WEIGHT_COLUMNS + VOLUME_COLUMNS)
         if not columns:
-            skipped.append(SkippedCheck(check="Вес/объём", reason="Проверка пропущена — не найдены колонки веса или объёма."))
+            skipped.append(SkippedCheck(check="Вес/объём", reason="Не проверялось: не найдены колонки веса или объёма."))
             return {"columns": [], "parsed_count": 0, "missing_count": 0, "coverage_share": 0.0, "missing_share": 0.0}
 
         parsed_mask = pd.Series(False, index=df.index)
@@ -215,7 +215,7 @@ class DataQualityService:
     ) -> dict[str, object]:
         columns = _present_columns(df, WEIGHT_COLUMNS + RAW_WEIGHT_COLUMNS + VOLUME_COLUMNS)
         if not columns:
-            skipped.append(SkippedCheck(check="Аномалии веса/объёма", reason="Проверка пропущена — не найдены числовые колонки веса или объёма."))
+            skipped.append(SkippedCheck(check="Аномалии веса/объёма", reason="Не проверялось: не найдены числовые колонки веса или объёма."))
             return {"columns": [], "count": 0, "zero_or_negative": 0, "too_large": 0, "suspicious": 0}
 
         zero_or_negative = pd.Series(False, index=df.index)
@@ -224,7 +224,7 @@ class DataQualityService:
         for column in columns:
             numeric = _numeric_series(df[column])
             present = numeric.notna()
-            zero_or_negative |= (present & numeric.le(0)).fillna(False)
+            zero_or_negative |= (present & numeric.lt(0)).fillna(False)
             if _normalized(column) in {_normalized(item) for item in VOLUME_COLUMNS}:
                 too_large |= numeric.gt(MAX_REASONABLE_VOLUME_KG).fillna(False)
             else:
@@ -243,7 +243,7 @@ class DataQualityService:
         total_anomalies = int(anomaly_mask.sum())
 
         if zero_count:
-            problems.append(QualityProblem(type="Нулевой или отрицательный вес/объём", count=zero_count, share=_share(zero_count, total_rows), comment="Значение нужно проверить вручную."))
+            problems.append(QualityProblem(type="Отрицательный вес/объём", count=zero_count, share=_share(zero_count, total_rows), comment="Нулевой вес не считается аномалией, отрицательное значение нужно проверить вручную."))
         if large_count:
             problems.append(QualityProblem(type="Слишком большой вес/объём", count=large_count, share=_share(large_count, total_rows), comment="Проверь единицы измерения и десятичные разделители."))
         if suspicious_count:
@@ -267,7 +267,7 @@ class DataQualityService:
     ) -> dict[str, object]:
         columns = _present_columns(df, CLASSIFICATION_COLUMNS)
         if not columns:
-            skipped.append(SkippedCheck(check="Классификация", reason="Проверка пропущена — не найдены классификационные колонки."))
+            skipped.append(SkippedCheck(check="Классификация", reason="Не проверялось: не найдены классификационные колонки."))
             return {"columns": [], "classified_count": 0, "unclassified_count": 0, "coverage_share": 0.0, "unclassified_share": 0.0}
 
         classified_mask = pd.Series(False, index=df.index)
@@ -301,28 +301,31 @@ class DataQualityService:
         problems: list[QualityProblem],
         skipped: list[SkippedCheck],
     ) -> dict[str, object]:
-        column = _first_present_column(df, IDENTIFIER_COLUMNS)
-        if not column:
-            skipped.append(SkippedCheck(check="Дубли", reason="Проверка дублей пропущена — не найдена колонка идентификатора."))
-            return {"checked": False, "identifier_column": None, "duplicate_rows": 0, "duplicate_keys": 0, "share": 0.0}
+        columns = [str(column) for column in df.columns if not str(column).startswith("__quality_")]
+        if not columns:
+            skipped.append(SkippedCheck(check="Дубли строк", reason="Не проверялось: нет пользовательских колонок."))
+            return {"checked": False, "identifier_column": None, "columns": [], "duplicate_rows": 0, "duplicate_keys": 0, "share": 0.0}
 
-        identifiers = df[column].astype("string").fillna("").str.strip()
-        non_empty = identifiers.ne("")
-        duplicate_mask = identifiers.duplicated(keep=False) & non_empty
+        normalized = df[columns].copy()
+        for column in columns:
+            normalized[column] = normalized[column].astype("string").fillna("").str.strip()
+        non_empty = normalized.ne("").any(axis=1)
+        duplicate_mask = normalized.duplicated(keep=False) & non_empty
         duplicate_rows = int(duplicate_mask.sum())
-        duplicate_keys = int(identifiers[duplicate_mask].nunique()) if duplicate_rows else 0
+        duplicate_keys = int(normalized.loc[duplicate_mask, columns].drop_duplicates().shape[0]) if duplicate_rows else 0
         if duplicate_rows:
             problems.append(
                 QualityProblem(
-                    type="Дубли по идентификатору",
+                    type="Полные дубли строк",
                     count=duplicate_rows,
                     share=_share(duplicate_rows, total_rows),
-                    comment=f"Колонка: {column}. Уникальных повторяющихся ID: {duplicate_keys}.",
+                    comment=f"Строка полностью повторяется по {len(columns)} пользовательским колонкам. Групп дублей: {duplicate_keys}.",
                 )
             )
         return {
             "checked": True,
-            "identifier_column": column,
+            "identifier_column": None,
+            "columns": columns,
             "duplicate_rows": duplicate_rows,
             "duplicate_keys": duplicate_keys,
             "share": _share(duplicate_rows, total_rows),
@@ -342,7 +345,7 @@ class DataQualityService:
     ) -> list[str]:
         reasons: list[str] = []
         if float(key_metrics.get("share") or 0) >= WARNING_SHARE_THRESHOLD:
-            reasons.append("Есть существенные пропуски в ключевых полях.")
+            reasons.append("Есть существенные пустые значения в ключевых полях.")
         if float(weight_metrics.get("missing_share") or 0) >= WARNING_SHARE_THRESHOLD:
             reasons.append("У заметной части строк не найден вес/объём.")
         if int(anomaly_metrics.get("count") or 0) > 0:
@@ -350,10 +353,7 @@ class DataQualityService:
         if float(classification_metrics.get("unclassified_share") or 0) >= WARNING_SHARE_THRESHOLD:
             reasons.append("Есть неклассифицированные строки.")
         if int(duplicate_metrics.get("duplicate_rows") or 0) > 0:
-            reasons.append("Найдены дубли по идентификатору товара.")
-        skipped_names = {item.check for item in skipped}
-        if total_rows and {"Вес/объём", "Классификация"} & skipped_names:
-            reasons.append("Часть важных проверок пропущена из-за отсутствующих колонок.")
+            reasons.append("Найдены полностью одинаковые строки.")
         return reasons
 
     def _fail_report(self, source: QualityDataSource, reason: str, *, total_rows: int = 0) -> dict[str, object]:
@@ -368,7 +368,7 @@ class DataQualityService:
                 "weight_volume": {"columns": [], "parsed_count": 0, "missing_count": 0, "coverage_share": 0.0, "missing_share": 0.0},
                 "anomalies": {"columns": [], "count": 0, "zero_or_negative": 0, "too_large": 0, "suspicious": 0},
                 "classification": {"columns": [], "classified_count": 0, "unclassified_count": 0, "coverage_share": 0.0, "unclassified_share": 0.0},
-                "duplicates": {"checked": False, "identifier_column": None, "duplicate_rows": 0, "duplicate_keys": 0, "share": 0.0},
+                "duplicates": {"checked": False, "identifier_column": None, "columns": [], "duplicate_rows": 0, "duplicate_keys": 0, "share": 0.0},
             },
             "problems": [asdict(QualityProblem(type="Файл не проверен", count=0, share=0.0, comment=reason))],
             "skipped_checks": [],
@@ -439,7 +439,7 @@ class DataQualityService:
             f"Вес/объём найден: {weight.get('parsed_count', 0)}. "
             f"Классифицировано: {classification.get('classified_count', 0)}. "
             f"Аномалий: {anomalies.get('count', 0)}. "
-            f"Дублей: {duplicates.get('duplicate_rows', 0)}."
+            f"Полных дублей строк: {duplicates.get('duplicate_rows', 0)}."
         )
 
 

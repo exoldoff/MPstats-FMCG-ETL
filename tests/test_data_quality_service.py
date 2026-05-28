@@ -72,6 +72,7 @@ class DataQualityServiceTest(unittest.TestCase):
                 root,
                 "unit",
                 [
+                    {"Название": "Вес нулевой", "Маркетплейс": "Ozon", "Категория": "Тест", "SKU": "sku-0", "Вес, кг": 0.0, "Подкатегория": "Тест"},
                     {"Название": "Вес отрицательный", "Маркетплейс": "Ozon", "Категория": "Тест", "SKU": "sku-1", "Вес, кг": -1.0, "Подкатегория": "Тест"},
                     {"Название": "Очень большой", "Маркетплейс": "Ozon", "Категория": "Тест", "SKU": "sku-2", "Вес, кг": 45.0, "Подкатегория": "Тест"},
                     {"Название": "Очень маленький", "Маркетплейс": "Ozon", "Категория": "Тест", "SKU": "sku-3", "Вес, кг": 0.0005, "Подкатегория": "Тест"},
@@ -85,6 +86,27 @@ class DataQualityServiceTest(unittest.TestCase):
             self.assertEqual(report["metrics"]["anomalies"]["too_large"], 1)
             self.assertEqual(report["metrics"]["anomalies"]["suspicious"], 1)
             self.assertEqual(len(report["examples"]["anomalies"]), 3)
+
+    def test_duplicates_are_checked_by_full_row_not_identifier(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_quality_csv(
+                root,
+                "unit",
+                [
+                    {"Дата": "01.01.2025", "Название": "Лимон 1 кг", "Маркетплейс": "Ozon", "Категория": "Кислота", "SKU": "sku-1", "Вес, кг": 1.0, "Подкатегория": "Лимонная"},
+                    {"Дата": "01.02.2025", "Название": "Лимон 1 кг", "Маркетплейс": "Ozon", "Категория": "Кислота", "SKU": "sku-1", "Вес, кг": 1.0, "Подкатегория": "Лимонная"},
+                    {"Дата": "01.03.2025", "Название": "Мыло 1 кг", "Маркетплейс": "WB", "Категория": "Мыло", "SKU": "sku-2", "Вес, кг": 1.0, "Подкатегория": "Жидкое"},
+                    {"Дата": "01.03.2025", "Название": "Мыло 1 кг", "Маркетплейс": "WB", "Категория": "Мыло", "SKU": "sku-2", "Вес, кг": 1.0, "Подкатегория": "Жидкое"},
+                ],
+            )
+
+            report = make_service(root).build_report("unit")
+
+            self.assertEqual(report["status"], "WARNING")
+            self.assertEqual(report["metrics"]["duplicates"]["duplicate_rows"], 2)
+            self.assertEqual(report["metrics"]["duplicates"]["duplicate_keys"], 1)
+            self.assertTrue(any(problem["type"] == "Полные дубли строк" for problem in report["problems"]))
 
     def test_csv_without_optional_columns_does_not_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -100,7 +122,7 @@ class DataQualityServiceTest(unittest.TestCase):
 
             report = make_service(root).build_report("unit")
 
-            self.assertEqual(report["status"], "WARNING")
+            self.assertEqual(report["status"], "OK")
             self.assertEqual(report["total_rows"], 2)
             self.assertTrue(any(item["check"] == "Вес/объём" for item in report["skipped_checks"]))
             self.assertTrue(any(item["check"] == "Классификация" for item in report["skipped_checks"]))
