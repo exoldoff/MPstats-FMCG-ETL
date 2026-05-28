@@ -269,6 +269,9 @@ export type CubeItem = {
   category_key: string;
   category_name: string;
   rows_count: number;
+  days_loaded?: number | null;
+  days_in_month?: number | null;
+  data_actual_until?: string | null;
   saved_to_db_at: string;
   source_processed_file_path?: string | null;
 };

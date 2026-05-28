@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -59,6 +60,25 @@ def next_month(year: int, month: int) -> tuple[int, int]:
 
 def ym(year: int, month: int) -> str:
     return f"{year}-{month:02d}"
+
+
+def month_day_coverage(year: int, month: int, *, today: date | None = None) -> dict[str, Any]:
+    current = today or date.today()
+    days_in_month = calendar.monthrange(year, month)[1]
+    target_index = year * 12 + month
+    current_index = current.year * 12 + current.month
+    if target_index < current_index:
+        days_loaded = days_in_month
+    elif target_index == current_index:
+        days_loaded = min(current.day, days_in_month)
+    else:
+        days_loaded = 0
+    data_actual_until = date(year, month, days_loaded).isoformat() if days_loaded else None
+    return {
+        "days_loaded": days_loaded,
+        "days_in_month": days_in_month,
+        "data_actual_until": data_actual_until,
+    }
 
 
 def category_active_in_month(category: dict[str, Any], year: int, month: int) -> bool:
@@ -600,6 +620,7 @@ class SmartPipelineService:
                 "rows_count": total_rows,
                 "source_processed_file_path": str(classified_path),
                 "file_hash": file_sha1(classified_path),
+                **month_day_coverage(int(task["year"]), int(task["month"])),
             }
         )
         self.repository.update_download_task(

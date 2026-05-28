@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from io import BytesIO
 import json
 import os
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from mpstats_app.config import AppSettings
 from mpstats_app.main import create_app
 from mpstats_app.repositories.duckdb_repository import DuckDbAppRepository
+from mpstats_app.services.smart_pipeline_service import month_day_coverage
 from pipeline.repositories.file_repository import write_semicolon_csv
 from pipeline.repositories.sql_repository import connect
 
@@ -84,6 +86,17 @@ def _has_openpyxl() -> bool:
 
 
 class WebApiTest(unittest.TestCase):
+    def test_month_day_coverage_marks_current_month_by_saved_day(self) -> None:
+        current = month_day_coverage(2026, 5, today=date(2026, 5, 28))
+        self.assertEqual(current["days_loaded"], 28)
+        self.assertEqual(current["days_in_month"], 31)
+        self.assertEqual(current["data_actual_until"], "2026-05-28")
+
+        past = month_day_coverage(2026, 4, today=date(2026, 5, 28))
+        self.assertEqual(past["days_loaded"], 30)
+        self.assertEqual(past["days_in_month"], 30)
+        self.assertEqual(past["data_actual_until"], "2026-04-30")
+
     def test_db_import_widens_empty_classifier_column_to_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -256,6 +269,9 @@ class WebApiTest(unittest.TestCase):
                         "category_key": "test",
                         "category_name": "Тест",
                         "rows_count": 1,
+                        "days_loaded": 17,
+                        "days_in_month": 31,
+                        "data_actual_until": "2025-01-17",
                         "source_processed_file_path": "unit.csv",
                         "file_hash": "hash",
                     }
@@ -285,6 +301,12 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(unit["cube_slices_count"], 1)
                 self.assertEqual(unit["product_rows_count"], 1)
                 self.assertTrue(unit["has_files"])
+                cube = client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"})
+                self.assertEqual(cube.status_code, 200)
+                cube_item = cube.json()["items"][0]
+                self.assertEqual(cube_item["days_loaded"], 17)
+                self.assertEqual(cube_item["days_in_month"], 31)
+                self.assertEqual(cube_item["data_actual_until"], "2025-01-17")
 
                 deleted = client.delete("/api/projects", params={"project_name": "unit", "delete_files": True})
                 self.assertEqual(deleted.status_code, 200)

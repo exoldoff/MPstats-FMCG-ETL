@@ -2735,6 +2735,13 @@ function formatDateTime(value: string | null | undefined) {
   return date.toLocaleString("ru-RU");
 }
 
+function formatDate(value: string | null | undefined) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("ru-RU");
+}
+
 function CategorySourceEditor(props: {
   rows: CategorySourceRow[];
   selectedRow: CategorySourceRow | null;
@@ -3091,6 +3098,14 @@ function CubeTable(props: { items: CubeItem[] }) {
         { id: "category", label: "Категория", value: (item) => item.category_name },
         { id: "rows", label: "Строк", value: (item) => item.rows_count, numeric: true },
         {
+          id: "days",
+          label: "Дней",
+          value: (item) => item.days_loaded ?? 0,
+          render: cubeDaysLabel,
+          title: (item) => item.data_actual_until ? `Данные актуальны по ${formatDate(item.data_actual_until)}` : "Покрытие по дням пока не сохранено.",
+          numeric: true
+        },
+        {
           id: "source",
           label: "Источник",
           value: (item) => item.source_processed_file_path ?? "-",
@@ -3099,6 +3114,12 @@ function CubeTable(props: { items: CubeItem[] }) {
       ]}
     />
   );
+}
+
+function cubeDaysLabel(item: CubeItem) {
+  if (item.days_loaded == null || item.days_in_month == null) return "-";
+  const base = `${formatNumber(item.days_loaded)}/${formatNumber(item.days_in_month)}`;
+  return item.data_actual_until ? `${base} · по ${formatDate(item.data_actual_until)}` : base;
 }
 
 function SimpleTable(props: { columns: string[]; rows: Record<string, unknown>[] }) {

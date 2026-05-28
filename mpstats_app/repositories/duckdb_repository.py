@@ -762,16 +762,20 @@ class DuckDbAppRepository:
                 INSERT INTO cube_registry (
                     id, project_name, year, month, marketplace, marketplace_code,
                     category_key, category_name, rows_count, saved_to_db_at,
-                    source_processed_file_path, file_hash
+                    source_processed_file_path, file_hash, days_loaded,
+                    days_in_month, data_actual_until
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?)
                 ON CONFLICT (project_name, year, month, marketplace_code, category_key) DO UPDATE SET
                     marketplace = EXCLUDED.marketplace,
                     category_name = EXCLUDED.category_name,
                     rows_count = EXCLUDED.rows_count,
                     saved_to_db_at = now(),
                     source_processed_file_path = EXCLUDED.source_processed_file_path,
-                    file_hash = EXCLUDED.file_hash
+                    file_hash = EXCLUDED.file_hash,
+                    days_loaded = EXCLUDED.days_loaded,
+                    days_in_month = EXCLUDED.days_in_month,
+                    data_actual_until = EXCLUDED.data_actual_until
                 """,
                 [
                     entry_id,
@@ -785,6 +789,9 @@ class DuckDbAppRepository:
                     int(entry.get("rows_count") or 0),
                     entry.get("source_processed_file_path"),
                     entry.get("file_hash"),
+                    entry.get("days_loaded"),
+                    entry.get("days_in_month"),
+                    entry.get("data_actual_until"),
                 ],
             )
         return self.get_cube_entry(
