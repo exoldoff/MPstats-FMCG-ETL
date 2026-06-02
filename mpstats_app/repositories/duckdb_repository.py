@@ -20,6 +20,8 @@ from mpstats_app.utils import clean_record, clean_records, quote_duckdb_name
 SEARCH_COLUMNS = ("SKU", "Артикул", "Название", "Бренд", "Категория")
 EXPORT_METADATA_COLUMNS = ("__project_name", "__year", "__month", "__marketplace_code", "__category_key", "__row_hash")
 TEXT_DB_TYPES = ("CHAR", "STRING", "TEXT", "VARCHAR")
+CUBE_SALES_FILTER_COLUMNS = ("Продажи, шт", "Продажи", "sales")
+CUBE_VOLUME_FILTER_COLUMNS = ("Объем, кг", "Объём, кг", "Объем, т", "Объём, т", "Объем", "Объём", "volume_kg", "volume_t", "volume")
 
 
 def _table_column_types(con: Any, table_name: str) -> dict[str, str]:
@@ -53,6 +55,31 @@ def _series_has_text_values(series: pd.Series) -> bool:
         return False
     numeric_values = pd.to_numeric(text_values.str.replace(",", ".", regex=False), errors="coerce")
     return bool(numeric_values.isna().any())
+
+
+def _first_existing_column(df: pd.DataFrame, columns: tuple[str, ...]) -> str | None:
+    for column in columns:
+        if column in df.columns:
+            return column
+    return None
+
+
+def _numeric_filter_values(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0)
+    text = series.astype("string").str.replace("\u00a0", "", regex=False).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
+    return pd.to_numeric(text, errors="coerce").fillna(0)
+
+
+def _filter_positive_cube_rows(df: pd.DataFrame) -> pd.DataFrame:
+    sales_column = _first_existing_column(df, CUBE_SALES_FILTER_COLUMNS)
+    volume_column = _first_existing_column(df, CUBE_VOLUME_FILTER_COLUMNS)
+    mask = pd.Series(True, index=df.index)
+    if sales_column:
+        mask &= _numeric_filter_values(df[sales_column]) > 0
+    if volume_column:
+        mask &= _numeric_filter_values(df[volume_column]) > 0
+    return df.loc[mask].copy()
 
 
 def _period_index_to_label(index: int) -> str:
@@ -1258,6 +1285,7 @@ class DuckDbAppRepository:
         load_name: str | None = None,
     ) -> int:
         df = read_semicolon_csv(csv_path, low_memory=False)
+        df = _filter_positive_cube_rows(df)
         df["__run_id"] = run_id
         df["__source_file"] = str(csv_path)
         df["__imported_at"] = datetime.now()
@@ -1315,6 +1343,7 @@ class DuckDbAppRepository:
         load_name: str | None = None,
     ) -> int:
         df = read_semicolon_csv(csv_path, low_memory=False)
+        df = _filter_positive_cube_rows(df)
         df["__run_id"] = run_id
         df["__source_file"] = str(csv_path)
         df["__imported_at"] = datetime.now()

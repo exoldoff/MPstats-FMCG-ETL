@@ -683,7 +683,6 @@ class SmartPipelineService:
             category_key=str(task["category_key"]),
             overwrite=bool(settings.get("overwrite_db")),
         )
-        total_rows = len(read_semicolon_csv(classified_path, low_memory=False))
         self.repository.upsert_cube_entry(
             {
                 "project_name": task["project_name"],
@@ -693,7 +692,7 @@ class SmartPipelineService:
                 "marketplace_code": task["marketplace_code"],
                 "category_key": task["category_key"],
                 "category_name": task["category_name"],
-                "rows_count": total_rows,
+                "rows_count": inserted,
                 "source_processed_file_path": str(classified_path),
                 "file_hash": file_sha1(classified_path),
                 **month_day_coverage(int(task["year"]), int(task["month"])),
@@ -701,7 +700,7 @@ class SmartPipelineService:
         )
         self.repository.update_download_task(
             task_id,
-            {"status": "saved_to_db", "save_status": "saved_to_db", "rows_count": total_rows, "error_message": None},
+            {"status": "saved_to_db", "save_status": "saved_to_db", "rows_count": inserted, "error_message": None},
         )
         if inserted == 0:
             return

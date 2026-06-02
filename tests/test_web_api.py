@@ -155,6 +155,41 @@ class WebApiTest(unittest.TestCase):
             self.assertEqual(data_type, "VARCHAR")
             self.assertEqual(values, [(None,), ("Тростниковый",)])
 
+    def test_db_import_filters_zero_sales_and_volume_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            source_file = root / "products.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"SKU": "valid", "Продажи, шт": "5", "Объем, т": "0,25"},
+                        {"SKU": "zero-sales", "Продажи, шт": "0", "Объем, т": "0,25"},
+                        {"SKU": "zero-volume", "Продажи, шт": "5", "Объем, т": "0"},
+                    ]
+                ),
+                source_file,
+            )
+
+            inserted = repository.import_products_file_idempotent(
+                run_id="run-1",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+
+            self.assertEqual(inserted, 1)
+            with connect(settings.db_path) as con:
+                rows = con.execute(f"SELECT SKU FROM {settings.products_table}").fetchall()
+            self.assertEqual(rows, [("valid",)])
+
     def test_health_settings_schedules_and_run_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -651,11 +686,11 @@ class WebApiTest(unittest.TestCase):
                     )
                 self.assertEqual(split.status_code, 200)
                 split_payload = split.json()
-                self.assertEqual(split_payload["total"], 4)
-                self.assertEqual(len(split_payload["artifacts"]), 4)
+                self.assertEqual(split_payload["total"], 3)
+                self.assertEqual(len(split_payload["artifacts"]), 3)
                 self.assertEqual(
                     sorted(item["category_key"] for item in split_payload["artifacts"]),
-                    ["lemon-oz", "lemon-oz", "lemon-oz", "soap-wb"],
+                    ["lemon-oz", "lemon-oz", "soap-wb"],
                 )
 
     def test_workflow_categories_classify_preview_and_save(self) -> None:
