@@ -485,7 +485,10 @@ class WebApiTest(unittest.TestCase):
             )
 
             app = create_app(settings, start_workers=False)
-            with TestClient(app) as client:
+            with (
+                patch.object(app.state.repository, "count_export_products", side_effect=AssertionError("Export flow should reuse breakdown totals.")),
+                TestClient(app) as client,
+            ):
                 options = client.get("/api/exports/options", params={"project_name": "unit"})
                 self.assertEqual(options.status_code, 200)
                 options_payload = options.json()

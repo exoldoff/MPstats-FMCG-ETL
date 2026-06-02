@@ -171,7 +171,8 @@ class ExportService:
             sort_direction=sort_direction,
             split_by_category=split_by_category,
         )
-        total = self._count(spec)
+        breakdown = self._breakdown(spec)
+        total = self._total_from_breakdown(breakdown)
         df = self.repository.fetch_export_products_dataframe(
             table_name=self.settings.products_table,
             project_name=spec.project_name,
@@ -186,9 +187,9 @@ class ExportService:
             limit=limit,
             offset=offset,
             include_row_hash=True,
+            default_order=bool(spec.sort_column),
         )
-        estimated_files = self._estimate_file_count(spec, total)
-        breakdown = self._breakdown(spec)
+        estimated_files = self._estimate_file_count(spec, total, breakdown=breakdown)
         return {
             "columns": spec.selected_columns,
             "rows": clean_records(df.where(pd.notna(df), None).to_dict(orient="records")),
@@ -226,11 +227,12 @@ class ExportService:
             sort_direction=sort_direction,
             split_by_category=split_by_category,
         )
-        total = self._count(spec)
+        breakdown = self._breakdown(spec)
+        total = self._total_from_breakdown(breakdown)
         if total <= 0:
             raise ValueError("Нет строк для выгрузки. Проверь категории, период и фильтры.")
 
-        estimated_files = self._estimate_file_count(spec, total)
+        estimated_files = self._estimate_file_count(spec, total, breakdown=breakdown)
         if estimated_files > LARGE_EXPORT_FILE_WARNING and not confirm_large_export:
             raise ValueError(
                 f"Выгрузка создаст {estimated_files} файлов. Подтверди большую выгрузку и запусти экспорт ещё раз."
@@ -242,10 +244,10 @@ class ExportService:
 
         artifacts: list[dict[str, Any]] = []
         if spec.split_by_category:
-            categories = self._selected_categories(spec)
+            categories = self._selected_categories_from_breakdown(breakdown)
             for category in categories:
                 category_spec = replace(spec, category_keys=[str(category["category_key"])])
-                category_total = self._count(category_spec)
+                category_total = int(category.get("rows_count") or 0)
                 if category_total <= 0:
                     continue
                 artifacts.extend(
@@ -265,7 +267,7 @@ class ExportService:
             "estimated_files": estimated_files,
             "output_dir": str(target_dir),
             "split_by_category": spec.split_by_category,
-            "breakdown": self._breakdown(spec),
+            "breakdown": breakdown,
             "warnings": self._warnings_for_estimate(estimated_files),
         }
 
@@ -372,24 +374,39 @@ class ExportService:
             excluded_row_hashes=spec.excluded_row_hashes,
         )
 
-    def _estimate_file_count(self, spec: ExportSpec, total: int) -> int:
+    @staticmethod
+    def _total_from_breakdown(breakdown: list[dict[str, Any]]) -> int:
+        return sum(int(item.get("rows_count") or 0) for item in breakdown)
+
+    def _estimate_file_count(self, spec: ExportSpec, total: int, *, breakdown: list[dict[str, Any]] | None = None) -> int:
         if total <= 0:
             return 0
         if not spec.split_by_category:
             return math.ceil(total / EXCEL_MAX_DATA_ROWS)
-        estimated = 0
-        for category in self._selected_categories(spec):
-            category_spec = replace(spec, category_keys=[str(category["category_key"])])
-            category_total = self._count(category_spec)
-            if category_total > 0:
-                estimated += math.ceil(category_total / EXCEL_MAX_DATA_ROWS)
-        return estimated
+        categories = self._selected_categories_from_breakdown(breakdown if breakdown is not None else self._breakdown(spec))
+        return sum(math.ceil(int(category.get("rows_count") or 0) / EXCEL_MAX_DATA_ROWS) for category in categories)
 
-    def _selected_categories(self, spec: ExportSpec) -> list[dict[str, Any]]:
-        return self.repository.export_categories(
-            table_name=self.settings.products_table,
-            project_name=spec.project_name,
-            category_keys=spec.category_keys or None,
+    @staticmethod
+    def _selected_categories_from_breakdown(breakdown: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        categories: dict[str, dict[str, Any]] = {}
+        for row in breakdown:
+            category_key = str(row.get("category_key") or "")
+            if not category_key:
+                continue
+            item = categories.setdefault(
+                category_key,
+                {
+                    "category_key": category_key,
+                    "category_name": row.get("category_name") or category_key,
+                    "marketplace_code": row.get("marketplace_code"),
+                    "marketplace": row.get("marketplace") or row.get("marketplace_code"),
+                    "rows_count": 0,
+                },
+            )
+            item["rows_count"] = int(item.get("rows_count") or 0) + int(row.get("rows_count") or 0)
+        return sorted(
+            categories.values(),
+            key=lambda item: (str(item.get("category_name") or "").casefold(), str(item.get("marketplace") or "").casefold()),
         )
 
     def _write_parts(

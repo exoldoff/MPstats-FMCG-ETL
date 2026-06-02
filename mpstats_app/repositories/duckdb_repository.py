@@ -1520,7 +1520,7 @@ class DuckDbAppRepository:
                 "warnings": warnings,
             }
 
-        period = self._fetch_one(
+        period = self._export_period_from_cube(project_name=project_name) or self._fetch_one(
             f"""
             SELECT
                 MIN(CAST({quote_duckdb_name('__year')} AS INTEGER) * 12 + CAST({quote_duckdb_name('__month')} AS INTEGER)) AS min_period,
@@ -1532,10 +1532,11 @@ class DuckDbAppRepository:
         )
         min_period = int(period["min_period"]) if period and period.get("min_period") is not None else None
         max_period = int(period["max_period"]) if period and period.get("max_period") is not None else None
+        cube_categories = self._export_categories_from_cube(project_name=project_name)
         return {
             "columns": visible_columns,
             "selected_columns": visible_columns,
-            "categories": self.export_categories(table_name=table_name, project_name=project_name),
+            "categories": cube_categories or self.export_categories(table_name=table_name, project_name=project_name),
             "period_from": _period_index_to_label(min_period) if min_period else None,
             "period_to": _period_index_to_label(max_period) if max_period else None,
             "warnings": warnings,
@@ -1690,6 +1691,7 @@ class DuckDbAppRepository:
         limit: int = 100,
         offset: int = 0,
         include_row_hash: bool = False,
+        default_order: bool = True,
     ) -> pd.DataFrame:
         columns = self.table_columns(table_name)
         self._require_export_metadata(columns)
@@ -1706,7 +1708,12 @@ class DuckDbAppRepository:
             filters=filters,
             excluded_row_hashes=excluded_row_hashes,
         )
-        order_sql = self._export_order_sql(columns=columns, sort_column=sort_column, sort_direction=sort_direction)
+        order_sql = self._export_order_sql(
+            columns=columns,
+            sort_column=sort_column,
+            sort_direction=sort_direction,
+            default_order=default_order,
+        )
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
             return con.execute(
@@ -1794,10 +1801,58 @@ class DuckDbAppRepository:
                 params.extend(hashes)
         return (" WHERE " + " AND ".join(where), params)
 
-    def _export_order_sql(self, *, columns: list[str], sort_column: str | None, sort_direction: str) -> str:
+    def _export_period_from_cube(self, *, project_name: str) -> dict[str, Any] | None:
+        row = self._fetch_one(
+            """
+            SELECT
+                MIN(year * 12 + month) AS min_period,
+                MAX(year * 12 + month) AS max_period,
+                COUNT(*) AS slices_count
+            FROM cube_registry
+            WHERE project_name = ?
+            """,
+            [project_name],
+        )
+        if not row or not row.get("slices_count"):
+            return None
+        return row
+
+    def _export_categories_from_cube(self, *, project_name: str, category_keys: list[str] | None = None) -> list[dict[str, Any]]:
+        where = ["project_name = ?"]
+        params: list[Any] = [project_name]
+        if category_keys:
+            placeholders = ", ".join("?" for _ in category_keys)
+            where.append(f"category_key IN ({placeholders})")
+            params.extend(category_keys)
+        return self._fetch_records(
+            f"""
+            SELECT
+                CAST(category_key AS VARCHAR) AS category_key,
+                MIN(CAST(category_name AS VARCHAR)) AS category_name,
+                CAST(marketplace_code AS VARCHAR) AS marketplace_code,
+                MIN(CAST(marketplace AS VARCHAR)) AS marketplace,
+                SUM(rows_count) AS rows_count
+            FROM cube_registry
+            WHERE {" AND ".join(where)}
+            GROUP BY category_key, marketplace_code
+            ORDER BY category_name, marketplace
+            """,
+            params,
+        )
+
+    def _export_order_sql(
+        self,
+        *,
+        columns: list[str],
+        sort_column: str | None,
+        sort_direction: str,
+        default_order: bool = True,
+    ) -> str:
         direction = "DESC" if str(sort_direction).lower() == "desc" else "ASC"
         if sort_column and sort_column in columns and not sort_column.startswith("__"):
             return f" ORDER BY {quote_duckdb_name(sort_column)} {direction} NULLS LAST"
+        if not default_order:
+            return ""
         default_columns = [
             column
             for column in ("__year", "__month", "Категория", "Маркетплейс", "Название", "SKU")
