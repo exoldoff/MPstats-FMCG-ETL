@@ -338,6 +338,12 @@ class WebApiTest(unittest.TestCase):
                 page_response = client.get("/workflow/monthly")
                 self.assertEqual(page_response.status_code, 200)
                 self.assertIn("root", page_response.text)
+                self.assertEqual(
+                    page_response.headers["cache-control"],
+                    "no-store, no-cache, must-revalidate, max-age=0",
+                )
+                self.assertEqual(page_response.headers["pragma"], "no-cache")
+                self.assertEqual(page_response.headers["expires"], "0")
 
     def test_product_search_uses_latest_successful_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

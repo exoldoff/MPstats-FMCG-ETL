@@ -34,6 +34,13 @@ from pipeline.repositories.data_quality_repository import DataQualityRepository
 from pipeline.services.data_quality_service import DataQualityService
 
 
+SPA_INDEX_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 def create_app(settings: AppSettings | None = None, *, start_workers: bool = True) -> FastAPI:
     app_settings = settings or AppSettings.create()
     repository = DuckDbAppRepository(app_settings)
@@ -112,8 +119,10 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
                 raise HTTPException(status_code=404, detail="API endpoint not found")
             target = static_dir / full_path
             if full_path and target.exists() and target.is_file():
+                if target.name == "index.html":
+                    return FileResponse(target, headers=SPA_INDEX_HEADERS)
                 return FileResponse(target)
-            return FileResponse(static_dir / "index.html")
+            return FileResponse(static_dir / "index.html", headers=SPA_INDEX_HEADERS)
 
     return app
 
