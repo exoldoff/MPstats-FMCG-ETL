@@ -1723,6 +1723,90 @@ a.ghost-button {
   gap: 10px;
 }
 
+.format-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #d4dde0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.format-switch button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 10px;
+  color: #415257;
+  background: transparent;
+  font-weight: 800;
+}
+
+.format-switch button.active {
+  color: #123432;
+  background: #e4f1ef;
+}
+
+.export-progress {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.export-progress.failed {
+  border-color: #efc1c1;
+  background: #fff0f0;
+}
+
+.export-progress-head,
+.export-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.export-progress-head strong,
+.export-progress-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-progress-head span {
+  color: #1f6f68;
+  font-weight: 900;
+}
+
+.export-progress-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e9eff1;
+}
+
+.export-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1f6f68;
+  transition: width 0.18s ease;
+}
+
+.export-progress-meta {
+  color: #627176;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.export-progress p {
+  color: #8b2727;
+  font-size: 13px;
+}
+
 .selector-head {
   justify-content: space-between;
 }

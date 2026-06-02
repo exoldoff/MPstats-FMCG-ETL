@@ -185,6 +185,7 @@ class ExportPreviewPayload(ProjectPayload):
     sort_column: str | None = None
     sort_direction: str = "asc"
     split_by_category: bool = False
+    export_format: str = Field(default="xlsx", pattern="^(xlsx|csv)$")
     limit: int = Field(default=100, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -204,4 +205,5 @@ class ExportTemplatePayload(ProjectPayload):
     sort_column: str | None = None
     sort_direction: str = "asc"
     split_by_category: bool = False
+    export_format: str = Field(default="xlsx", pattern="^(xlsx|csv)$")
     output_dir: str | None = None

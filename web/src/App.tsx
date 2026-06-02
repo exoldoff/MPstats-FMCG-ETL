@@ -43,7 +43,9 @@ import {
   ClassifierRule,
   CubeItem,
   ExportArtifact,
+  ExportBuildJob,
   ExportColumnFilter,
+  ExportFormat,
   ExportOptions,
   ExportPayload,
   ExportPreview,
@@ -210,6 +212,10 @@ function monthNow() {
 
 function errorText(exc: unknown) {
   return exc instanceof Error && exc.message ? exc.message : String(exc);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function addLoadError(errors: string[], label: string, reason: unknown) {
@@ -443,11 +449,13 @@ export function App() {
   const [exportPeriodTo, setExportPeriodTo] = useState("");
   const [exportOutputDir, setExportOutputDir] = useState("");
   const [exportSplitByCategory, setExportSplitByCategory] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("xlsx");
   const [exportExcludedRows, setExportExcludedRows] = useState<Set<string>>(new Set());
   const [exportSortColumn, setExportSortColumn] = useState<string | null>(null);
   const [exportSortDirection, setExportSortDirection] = useState<"asc" | "desc">("asc");
   const [exportPreview, setExportPreview] = useState<ExportPreview | null>(null);
   const [exportArtifacts, setExportArtifacts] = useState<ExportArtifact[]>([]);
+  const [exportProgress, setExportProgress] = useState<ExportBuildJob | null>(null);
   const [exportTemplates, setExportTemplates] = useState<ExportTemplate[]>([]);
   const [exportTemplateName, setExportTemplateName] = useState("");
   const [exportConfirmLarge, setExportConfirmLarge] = useState(false);
@@ -848,6 +856,7 @@ export function App() {
       sort_column: exportSortColumn,
       sort_direction: exportSortDirection,
       split_by_category: exportSplitByCategory,
+      export_format: exportFormat,
       output_dir: exportOutputDir || null,
       confirm_large_export: exportConfirmLarge,
       limit,
@@ -877,6 +886,7 @@ export function App() {
       sort_column: exportSortColumn,
       sort_direction: exportSortDirection,
       split_by_category: exportSplitByCategory,
+      export_format: exportFormat,
       output_dir: exportOutputDir || null
     };
   }
@@ -893,6 +903,7 @@ export function App() {
       sort_column: template.sort_column ?? null,
       sort_direction: template.sort_direction,
       split_by_category: template.split_by_category,
+      export_format: template.export_format ?? "xlsx",
       output_dir: template.output_dir ?? null,
       confirm_large_export: false,
       limit,
@@ -911,6 +922,7 @@ export function App() {
     setExportPeriodTo(template.period_to ?? "");
     setExportOutputDir(template.output_dir ?? "");
     setExportSplitByCategory(Boolean(template.split_by_category));
+    setExportFormat(template.export_format ?? "xlsx");
     setExportFilters(template.filters.map((filter, index) => ({ ...filter, id: `template-filter-${template.id}-${index}` })));
     setExportSortColumn(template.sort_column ?? null);
     setExportSortDirection(template.sort_direction === "desc" ? "desc" : "asc");
@@ -940,14 +952,39 @@ export function App() {
   }
 
   async function loadExportPreview() {
+    setExportProgress(null);
     const response = await api.previewExport(buildExportPayload(100));
     setExportPreview(response);
     if (response.estimated_files <= 10) setExportConfirmLarge(false);
     return response;
   }
 
+  async function waitForExportJob(jobId: string) {
+    let job = await api.getExportBuildJob(jobId);
+    setExportProgress(job);
+    while (job.status === "queued" || job.status === "running") {
+      await sleep(700);
+      job = await api.getExportBuildJob(jobId);
+      setExportProgress(job);
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || "Выгрузка завершилась ошибкой.");
+    }
+    if (!job.result) {
+      throw new Error("Выгрузка завершилась без результата.");
+    }
+    return job.result;
+  }
+
+  async function startExportJob(payload: ExportPayload) {
+    setExportArtifacts([]);
+    const job = await api.startExportBuild(payload);
+    setExportProgress(job);
+    return waitForExportJob(job.id);
+  }
+
   async function buildExportFiles() {
-    const response = await api.buildExport(buildExportPayload(100));
+    const response = await startExportJob(buildExportPayload(100));
     setExportArtifacts(response.artifacts);
     setExportPreview((prev) => (prev ? { ...prev, total: response.total, estimated_files: response.estimated_files, warnings: response.warnings } : prev));
     return response;
@@ -955,7 +992,7 @@ export function App() {
 
   async function buildExportFromTemplate(template: ExportTemplate) {
     applyExportTemplate(template);
-    const response = await api.buildExport(payloadFromExportTemplate(template, 100));
+    const response = await startExportJob(payloadFromExportTemplate(template, 100));
     setExportArtifacts(response.artifacts);
     setExportPreview(null);
     return response;
@@ -1097,6 +1134,14 @@ export function App() {
   function toggleAllExportColumns() {
     const all = exportOptions?.columns ?? [];
     setExportSelectedColumns((prev) => (prev.size === all.length ? new Set() : new Set(all)));
+  }
+
+  function changeExportFormat(value: ExportFormat) {
+    setExportFormat(value);
+    setExportPreview(null);
+    setExportArtifacts([]);
+    setExportProgress(null);
+    setExportConfirmLarge(false);
   }
 
   function toggleExportSort(column: string, direction?: SortDirection) {
@@ -1759,11 +1804,13 @@ export function App() {
               periodTo={exportPeriodTo}
               outputDir={exportOutputDir}
               splitByCategory={exportSplitByCategory}
+              exportFormat={exportFormat}
               excludedCount={exportExcludedRows.size}
               sortColumn={exportSortColumn}
               sortDirection={exportSortDirection}
               preview={exportPreview}
               artifacts={exportArtifacts}
+              progress={exportProgress}
               templates={exportTemplates}
               templateName={exportTemplateName}
               confirmLarge={exportConfirmLarge}
@@ -1771,7 +1818,7 @@ export function App() {
               onTemplateNameChange={setExportTemplateName}
               onSaveTemplate={() => void runAction("Сохранение шаблона выгрузки", saveExportTemplate)}
               onApplyTemplate={applyExportTemplate}
-              onBuildTemplate={(template) => void runAction("Выгрузка по шаблону", () => buildExportFromTemplate(template))}
+              onBuildTemplate={(template) => void runAction(`Выгрузка ${(template.export_format ?? "xlsx").toUpperCase()} по шаблону`, () => buildExportFromTemplate(template))}
               onDeleteTemplate={(template) => {
                 if (window.confirm(`Удалить шаблон «${template.name}»?`)) {
                   void runAction("Удаление шаблона выгрузки", () => deleteExportTemplate(template));
@@ -1789,6 +1836,7 @@ export function App() {
               onPeriodToChange={setExportPeriodTo}
               onOutputDirChange={setExportOutputDir}
               onSplitByCategoryChange={setExportSplitByCategory}
+              onExportFormatChange={changeExportFormat}
               onConfirmLargeChange={setExportConfirmLarge}
               onSort={toggleExportSort}
               onClearSort={() => {
@@ -1798,7 +1846,7 @@ export function App() {
               onExcludeRow={excludeExportRow}
               onClearExcluded={() => setExportExcludedRows(new Set())}
               onPreview={() => void runAction("Предпросмотр выгрузки", loadExportPreview)}
-              onBuild={() => void runAction("Выгрузка XLSX", buildExportFiles)}
+              onBuild={() => void runAction(`Выгрузка ${exportFormat.toUpperCase()}`, buildExportFiles)}
             />
           ) : null}
 
@@ -2401,11 +2449,13 @@ function ExportWorkspace(props: {
   periodTo: string;
   outputDir: string;
   splitByCategory: boolean;
+  exportFormat: ExportFormat;
   excludedCount: number;
   sortColumn: string | null;
   sortDirection: "asc" | "desc";
   preview: ExportPreview | null;
   artifacts: ExportArtifact[];
+  progress: ExportBuildJob | null;
   templates: ExportTemplate[];
   templateName: string;
   confirmLarge: boolean;
@@ -2427,6 +2477,7 @@ function ExportWorkspace(props: {
   onPeriodToChange: (value: string) => void;
   onOutputDirChange: (value: string) => void;
   onSplitByCategoryChange: (value: boolean) => void;
+  onExportFormatChange: (value: ExportFormat) => void;
   onConfirmLargeChange: (value: boolean) => void;
   onSort: (column: string, direction?: SortDirection) => void;
   onClearSort: () => void;
@@ -2439,6 +2490,7 @@ function ExportWorkspace(props: {
   const selectedColumnCount = options?.columns.filter((column) => props.selectedColumns.has(column)).length ?? 0;
   const selectedCategoryCount = options?.categories.filter((category) => props.selectedCategoryKeys.has(category.category_key)).length ?? 0;
   const needsLargeConfirm = Boolean(props.preview && props.preview.estimated_files > 10);
+  const formatLabel = props.exportFormat.toUpperCase();
   return (
     <section className="panel stage-panel export-panel">
       <SectionTitle
@@ -2465,11 +2517,11 @@ function ExportWorkspace(props: {
               <div className="template-row" key={template.id}>
                 <span>
                   <strong>{template.name}</strong>
-                  <small>{template.category_keys.length} категорий · {template.selected_columns.length} колонок · {template.period_from || "с начала"} - {template.period_to || "по последний"}</small>
+                  <small>{(template.export_format ?? "xlsx").toUpperCase()} · {template.category_keys.length} категорий · {template.selected_columns.length} колонок · {template.period_from || "с начала"} - {template.period_to || "по последний"}</small>
                 </span>
                 <div className="table-actions">
                   <button className="tiny-button" disabled={props.busy} onClick={() => props.onApplyTemplate(template)}>Применить</button>
-                  <button className="tiny-button" disabled={props.busy} onClick={() => props.onBuildTemplate(template)}>XLSX</button>
+                  <button className="tiny-button" disabled={props.busy} onClick={() => props.onBuildTemplate(template)}>{(template.export_format ?? "xlsx").toUpperCase()}</button>
                   <button className="tiny-button danger-inline" disabled={props.busy} onClick={() => props.onDeleteTemplate(template)}>Удалить</button>
                 </div>
               </div>
@@ -2496,11 +2548,15 @@ function ExportWorkspace(props: {
           </label>
           <div className="export-mode-row">
             <Toggle label="Разными файлами по категориям" checked={props.splitByCategory} onChange={props.onSplitByCategoryChange} />
+            <div className="format-switch" aria-label="Формат выгрузки">
+              <button className={props.exportFormat === "xlsx" ? "active" : ""} type="button" onClick={() => props.onExportFormatChange("xlsx")}>XLSX</button>
+              <button className={props.exportFormat === "csv" ? "active" : ""} type="button" onClick={() => props.onExportFormatChange("csv")}>CSV</button>
+            </div>
             <button className="ghost-button" onClick={props.onReloadOptions}><RefreshCcw size={17} />Обновить</button>
             <button className="ghost-button" disabled={props.busy || !options} onClick={props.onPreview}><Table2 size={17} />Предпросмотр</button>
             <button className="primary-inline-button" disabled={props.busy || !props.preview || (needsLargeConfirm && !props.confirmLarge)} onClick={props.onBuild}>
               <Download size={17} />
-              Выгрузить
+              {formatLabel}
             </button>
           </div>
         </div>
@@ -2544,6 +2600,7 @@ function ExportWorkspace(props: {
 
       {options?.warnings.length ? <div className="export-warning">{options.warnings.join(" ")}</div> : null}
       {props.preview?.warnings.length ? <div className="export-warning">{props.preview.warnings.join(" ")}</div> : null}
+      {props.progress ? <ExportProgress job={props.progress} /> : null}
 
       <div className="export-summary-row">
         <Metric label="Категорий" value={String(selectedCategoryCount)} />
@@ -2617,7 +2674,7 @@ function ExportWorkspace(props: {
                 <FileSpreadsheet size={17} />
                 <span>
                   <strong>{artifact.filename}</strong>
-                  <small>{artifact.rows} строк · часть {artifact.part}/{artifact.parts}</small>
+                  <small>{(artifact.format ?? props.exportFormat).toUpperCase()} · {artifact.rows} строк · часть {artifact.part}/{artifact.parts}</small>
                 </span>
               </a>
             ))}
@@ -2625,6 +2682,30 @@ function ExportWorkspace(props: {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function ExportProgress(props: { job: ExportBuildJob }) {
+  const progress = Math.max(0, Math.min(100, Number(props.job.progress) || 0));
+  const rowsText = props.job.total_rows
+    ? `${formatNumber(props.job.completed_rows)} / ${formatNumber(props.job.total_rows)} строк`
+    : "строки считаются";
+  const filesText = props.job.total_files
+    ? `${props.job.completed_files} / ${props.job.total_files} файлов`
+    : "файлы считаются";
+  return (
+    <div className={`export-progress ${props.job.status}`}>
+      <div className="export-progress-head">
+        <strong>{props.job.status === "succeeded" ? "Выгрузка готова" : props.job.status === "failed" ? "Выгрузка не завершилась" : props.job.current_step}</strong>
+        <span>{progress.toFixed(progress % 1 ? 1 : 0)}%</span>
+      </div>
+      <div className="export-progress-track"><span style={{ width: `${progress}%` }} /></div>
+      <div className="export-progress-meta">
+        <span>{rowsText}</span>
+        <span>{filesText}</span>
+      </div>
+      {props.job.error ? <p>{props.job.error}</p> : null}
+    </div>
   );
 }
 

@@ -539,6 +539,7 @@ class WebApiTest(unittest.TestCase):
                     json={
                         **{key: value for key, value in preview_payload.items() if key not in {"limit", "offset", "excluded_row_hashes"}},
                         "name": "Ежемесячный лимон",
+                        "export_format": "xlsx",
                         "output_dir": str(root / "template-exports"),
                     },
                 )
@@ -590,6 +591,37 @@ class WebApiTest(unittest.TestCase):
 
                 downloaded = client.get("/api/exports/download-file", params={"path": str(xlsx_path)})
                 self.assertEqual(downloaded.status_code, 200)
+
+                csv_job = client.post(
+                    "/api/exports/build-jobs",
+                    json={
+                        **preview_payload,
+                        "excluded_row_hashes": [excluded_hash],
+                        "output_dir": str(output_dir),
+                        "confirm_large_export": False,
+                        "export_format": "csv",
+                    },
+                )
+                self.assertEqual(csv_job.status_code, 200)
+                csv_job_payload = csv_job.json()
+                self.assertIn(csv_job_payload["status"], {"queued", "running", "succeeded"})
+                csv_job_id = csv_job_payload["id"]
+                for _ in range(40):
+                    csv_job_payload = client.get(f"/api/exports/build-jobs/{csv_job_id}").json()
+                    if csv_job_payload["status"] == "succeeded":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(csv_job_payload["status"], "succeeded")
+                self.assertEqual(csv_job_payload["progress"], 100.0)
+                csv_result = csv_job_payload["result"]
+                self.assertEqual(csv_result["export_format"], "csv")
+                self.assertEqual(csv_result["total"], 1)
+                csv_path = Path(csv_result["artifacts"][0]["path"])
+                self.assertEqual(csv_path.suffix, ".csv")
+                self.assertEqual(csv_result["artifacts"][0]["format"], "csv")
+                self.assertTrue(csv_path.exists())
+                csv_text = csv_path.read_text(encoding="utf-8-sig")
+                self.assertIn("SKU;Название;Бренд;Продажи, шт", csv_text.splitlines()[0])
 
                 with patch("mpstats_app.services.export_service.EXCEL_MAX_DATA_ROWS", 1), patch(
                     "mpstats_app.services.export_service.EXPORT_BATCH_SIZE", 1

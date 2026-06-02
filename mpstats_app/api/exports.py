@@ -51,6 +51,7 @@ def save_export_template(
             sort_column=payload.sort_column,
             sort_direction=payload.sort_direction,
             split_by_category=payload.split_by_category,
+            export_format=payload.export_format,
             output_dir=payload.output_dir,
         )
     )
@@ -82,6 +83,7 @@ def export_preview(
             sort_column=payload.sort_column,
             sort_direction=payload.sort_direction,
             split_by_category=payload.split_by_category,
+            export_format=payload.export_format,
             limit=payload.limit,
             offset=payload.offset,
         )
@@ -107,8 +109,41 @@ def export_build(
             split_by_category=payload.split_by_category,
             output_dir=payload.output_dir,
             confirm_large_export=payload.confirm_large_export,
+            export_format=payload.export_format,
         )
     )
+
+
+@router.post("/build-jobs")
+def export_build_job(
+    payload: ExportBuildPayload,
+    export_service: ExportService = Depends(get_export_service),
+) -> dict[str, object]:
+    return _handle(
+        lambda: export_service.start_build_job(
+            project_name=payload.project_name,
+            category_keys=payload.category_keys,
+            period_from=payload.period_from,
+            period_to=payload.period_to,
+            selected_columns=payload.selected_columns,
+            filters=[item.model_dump() for item in payload.filters],
+            excluded_row_hashes=payload.excluded_row_hashes,
+            sort_column=payload.sort_column,
+            sort_direction=payload.sort_direction,
+            split_by_category=payload.split_by_category,
+            output_dir=payload.output_dir,
+            confirm_large_export=payload.confirm_large_export,
+            export_format=payload.export_format,
+        )
+    )
+
+
+@router.get("/build-jobs/{job_id}")
+def export_build_job_status(
+    job_id: str,
+    export_service: ExportService = Depends(get_export_service),
+) -> dict[str, object]:
+    return _handle(lambda: export_service.get_build_job(job_id))
 
 
 @router.get("/download-file")

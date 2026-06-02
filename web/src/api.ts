@@ -335,13 +335,17 @@ export type ExportPreview = {
   rows: Record<string, unknown>[];
   total: number;
   estimated_files: number;
+  export_format?: ExportFormat;
   breakdown: ExportBreakdownItem[];
   warnings: string[];
 };
 
+export type ExportFormat = "xlsx" | "csv";
+
 export type ExportArtifact = {
   path: string;
   filename: string;
+  format?: ExportFormat;
   rows: number;
   part: number;
   parts: number;
@@ -367,8 +371,22 @@ export type ExportBuildResponse = {
   estimated_files: number;
   output_dir: string;
   split_by_category: boolean;
+  export_format?: ExportFormat;
   breakdown: ExportBreakdownItem[];
   warnings: string[];
+};
+
+export type ExportBuildJob = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed" | string;
+  progress: number;
+  total_rows: number;
+  completed_rows: number;
+  total_files: number;
+  completed_files: number;
+  current_step: string;
+  error?: string | null;
+  result?: ExportBuildResponse | null;
 };
 
 export type ExportPayload = {
@@ -382,6 +400,7 @@ export type ExportPayload = {
   sort_column?: string | null;
   sort_direction: "asc" | "desc" | string;
   split_by_category: boolean;
+  export_format?: ExportFormat;
   limit?: number;
   offset?: number;
   output_dir?: string | null;
@@ -400,6 +419,7 @@ export type ExportTemplate = {
   sort_column?: string | null;
   sort_direction: "asc" | "desc" | string;
   split_by_category: boolean;
+  export_format?: ExportFormat;
   output_dir?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -547,6 +567,9 @@ export const api = {
     request<ExportPreview>("/api/exports/preview", { method: "POST", body: JSON.stringify(payload) }),
   buildExport: (payload: ExportPayload) =>
     request<ExportBuildResponse>("/api/exports/build", { method: "POST", body: JSON.stringify(payload) }),
+  startExportBuild: (payload: ExportPayload) =>
+    request<ExportBuildJob>("/api/exports/build-jobs", { method: "POST", body: JSON.stringify(payload) }),
+  getExportBuildJob: (jobId: string) => request<ExportBuildJob>(`/api/exports/build-jobs/${encodeURIComponent(jobId)}`),
   listFiles: (projectName: string) => request<{ root: string; files: ProjectFile[] }>(`/api/workflow/pipeline/files?project_name=${encodeURIComponent(projectName)}`),
   deleteFile: (projectName: string, path: string, deleteCube: boolean) =>
     request<ProjectFileDeleteResponse>(
