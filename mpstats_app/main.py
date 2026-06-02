@@ -15,6 +15,7 @@ from mpstats_app.api.health import router as health_router
 from mpstats_app.api.products import router as products_router
 from mpstats_app.api.projects import router as projects_router
 from mpstats_app.api.quality import router as quality_router
+from mpstats_app.api.reports import router as reports_router
 from mpstats_app.api.runs import router as runs_router
 from mpstats_app.api.schedules import router as schedules_router
 from mpstats_app.api.settings import router as settings_router
@@ -26,6 +27,7 @@ from mpstats_app.services.classifier_rules_service import ClassifierRulesService
 from mpstats_app.services.export_service import ExportService
 from mpstats_app.services.job_service import JobService
 from mpstats_app.services.project_service import ProjectService
+from mpstats_app.services.report_service import ReportService
 from mpstats_app.services.scheduler_service import SchedulerService
 from mpstats_app.services.smart_plan_service import SmartPlanService
 from mpstats_app.services.smart_pipeline_service import SmartPipelineService
@@ -51,6 +53,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     smart_plan_service = SmartPlanService(settings=app_settings, repository=repository)
     project_service = ProjectService(settings=app_settings, repository=repository)
     export_service = ExportService(settings=app_settings, repository=repository)
+    report_service = ReportService(settings=app_settings, repository=repository)
     job_service = JobService(settings=app_settings, repository=repository)
     scheduler_service = SchedulerService(settings=app_settings, repository=repository, job_service=job_service)
     data_quality_service = DataQualityService(
@@ -78,6 +81,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     app.state.smart_plan_service = smart_plan_service
     app.state.project_service = project_service
     app.state.export_service = export_service
+    app.state.report_service = report_service
     app.state.job_service = job_service
     app.state.scheduler_service = scheduler_service
     app.state.data_quality_service = data_quality_service
@@ -95,6 +99,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     app.include_router(products_router)
     app.include_router(projects_router)
     app.include_router(exports_router)
+    app.include_router(reports_router)
     app.include_router(settings_router)
     app.include_router(schedules_router)
     app.include_router(workflow_router)

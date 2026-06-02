@@ -1907,6 +1907,51 @@ a.ghost-button {
   font-size: 12px;
 }
 
+.reports-panel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.reports-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.heavy-category-list,
+.reports-settings,
+.reports-preview {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.reports-settings {
+  grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr);
+  align-items: start;
+}
+
+.reports-main-settings,
+.reports-category-selector {
+  min-width: 0;
+}
+
+.reports-description {
+  color: #627176;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.reports-preview .table-wrap,
+.heavy-category-list .table-wrap {
+  max-height: 360px;
+}
+
 .column-sort-button {
   display: flex;
   align-items: center;
@@ -2284,7 +2329,8 @@ th {
 }
 
 .badge.failed,
-.badge.completed_with_errors {
+.badge.completed_with_errors,
+.badge.heavy {
   color: #8b2727;
   background: #f8e5e5;
 }
@@ -2536,6 +2582,8 @@ th {
   .editor-layout,
   .export-settings,
   .export-selectors,
+  .reports-overview,
+  .reports-settings,
   .smart-plan-overview,
   .quality-toolbar,
   .quality-status-card,

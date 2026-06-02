@@ -18,6 +18,7 @@ from mpstats_app.utils import clean_records, clean_value
 
 
 EXCEL_MAX_DATA_ROWS = 1_048_575
+RAW_XLSX_EXPORT_ROW_LIMIT = 1_048_575
 EXPORT_BATCH_SIZE = 50_000
 LARGE_EXPORT_FILE_WARNING = 10
 EXPORT_MATCH_TYPES = {"contains", "not_contains", "equals", "startswith", "gt", "gte", "lt", "lte"}
@@ -200,6 +201,11 @@ class ExportService:
             default_order=bool(spec.sort_column),
         )
         estimated_files = self._estimate_file_count(spec, total, breakdown=breakdown)
+        warnings = self._warnings_for_estimate(estimated_files)
+        if spec.export_format == "xlsx" and total > RAW_XLSX_EXPORT_ROW_LIMIT:
+            warnings.append(
+                f"Raw XLSX на {total} строк не строится. Используй Данные -> Отчёты: Excel получит агрегированную таблицу."
+            )
         return {
             "columns": spec.selected_columns,
             "rows": clean_records(df.where(pd.notna(df), None).to_dict(orient="records")),
@@ -207,7 +213,7 @@ class ExportService:
             "estimated_files": estimated_files,
             "export_format": spec.export_format,
             "breakdown": breakdown,
-            "warnings": self._warnings_for_estimate(estimated_files),
+            "warnings": warnings,
         }
 
     def build(
@@ -245,6 +251,11 @@ class ExportService:
         total = self._total_from_breakdown(breakdown)
         if total <= 0:
             raise ValueError("Нет строк для выгрузки. Проверь категории, период и фильтры.")
+        if spec.export_format == "xlsx" and total > RAW_XLSX_EXPORT_ROW_LIMIT:
+            raise ValueError(
+                f"Raw XLSX на {total} строк не строится. Для больших категорий открой Данные -> Отчёты "
+                "и выгрузи агрегированную таблицу для Excel."
+            )
 
         estimated_files = self._estimate_file_count(spec, total, breakdown=breakdown)
         if estimated_files > LARGE_EXPORT_FILE_WARNING and not confirm_large_export:

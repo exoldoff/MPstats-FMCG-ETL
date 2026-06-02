@@ -278,6 +278,10 @@ export type CubeItem = {
   days_loaded?: number | null;
   days_in_month?: number | null;
   data_actual_until?: string | null;
+  data_mode?: "standard" | "heavy" | string | null;
+  is_heavy?: boolean | null;
+  heavy_reason?: string | null;
+  reports_built_at?: string | null;
   saved_to_db_at: string;
   source_processed_file_path?: string | null;
 };
@@ -427,6 +431,87 @@ export type ExportTemplate = {
 
 export type ExportTemplatePayload = Omit<ExportTemplate, "id" | "created_at" | "updated_at">;
 
+export type ReportType = "category_month" | "brand_month" | "classification_month" | "top_sku";
+
+export type ReportDefinition = {
+  type: ReportType;
+  label: string;
+  description: string;
+};
+
+export type ReportCategory = {
+  project_name: string;
+  category_key: string;
+  category_name: string;
+  marketplace?: string | null;
+  marketplace_code?: string | null;
+  slices_count: number;
+  rows_count: number;
+  max_slice_rows: number;
+  is_heavy: boolean;
+  latest_saved_at?: string | null;
+  reports_built_at?: string | null;
+  heavy_reason?: string | null;
+  available_reports: ReportType[];
+};
+
+export type ReportOptions = {
+  project_name: string;
+  default_output_dir: string;
+  reports: ReportDefinition[];
+  categories: ReportCategory[];
+  period_from?: string | null;
+  period_to?: string | null;
+  columns: string[];
+  warnings: string[];
+  heavy_slice_rows_limit: number;
+  heavy_category_rows_limit: number;
+};
+
+export type ReportPreview = {
+  project_name: string;
+  report_type: ReportType;
+  report_label: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total: number;
+  preview_limit: number;
+  warnings: string[];
+};
+
+export type ReportArtifact = {
+  path: string;
+  filename: string;
+  format: ExportFormat;
+  rows: number;
+  report_type: ReportType;
+  report_label: string;
+};
+
+export type ReportBuildResponse = {
+  project_name: string;
+  report_type: ReportType;
+  report_label: string;
+  artifacts: ReportArtifact[];
+  total: number;
+  source_total: number;
+  output_dir: string;
+  warnings: string[];
+};
+
+export type ReportPayload = {
+  project_name: string;
+  report_type: ReportType;
+  category_keys: string[];
+  period_from?: string | null;
+  period_to?: string | null;
+  export_format: ExportFormat;
+  output_dir?: string | null;
+  max_rows: number;
+  limit?: number;
+  offset?: number;
+};
+
 export type FilePreview = {
   file: string;
   columns: string[];
@@ -497,6 +582,7 @@ function extractApiError(payload: unknown, fallback: string) {
 export const api = {
   workflowFileUrl: (path: string) => `${API_BASE}/api/workflow/download-file?path=${encodeURIComponent(path)}`,
   exportFileUrl: (path: string) => `${API_BASE}/api/exports/download-file?path=${encodeURIComponent(path)}`,
+  reportFileUrl: (path: string) => `${API_BASE}/api/reports/download-file?path=${encodeURIComponent(path)}`,
   getWorkflowSettings: () => request<WorkflowSettings>("/api/workflow/settings"),
   saveWorkflowSettings: (payload: WorkflowSettings) =>
     request<WorkflowSettings>("/api/workflow/settings", { method: "PUT", body: JSON.stringify(payload) }),
@@ -570,6 +656,11 @@ export const api = {
   startExportBuild: (payload: ExportPayload) =>
     request<ExportBuildJob>("/api/exports/build-jobs", { method: "POST", body: JSON.stringify(payload) }),
   getExportBuildJob: (jobId: string) => request<ExportBuildJob>(`/api/exports/build-jobs/${encodeURIComponent(jobId)}`),
+  getReportOptions: (projectName: string) => request<ReportOptions>(`/api/reports/options?project_name=${encodeURIComponent(projectName)}`),
+  previewReport: (payload: ReportPayload) =>
+    request<ReportPreview>("/api/reports/preview", { method: "POST", body: JSON.stringify(payload) }),
+  buildReport: (payload: ReportPayload) =>
+    request<ReportBuildResponse>("/api/reports/build", { method: "POST", body: JSON.stringify(payload) }),
   listFiles: (projectName: string) => request<{ root: string; files: ProjectFile[] }>(`/api/workflow/pipeline/files?project_name=${encodeURIComponent(projectName)}`),
   deleteFile: (projectName: string, path: string, deleteCube: boolean) =>
     request<ProjectFileDeleteResponse>(

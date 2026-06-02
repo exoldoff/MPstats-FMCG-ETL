@@ -698,6 +698,10 @@ class SmartPipelineService:
                 **month_day_coverage(int(task["year"]), int(task["month"])),
             }
         )
+        self.repository.refresh_large_category_flags(
+            project_name=str(task["project_name"]),
+            category_keys=[str(task["category_key"])],
+        )
         self.repository.update_download_task(
             task_id,
             {"status": "saved_to_db", "save_status": "saved_to_db", "rows_count": inserted, "error_message": None},

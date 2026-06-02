@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Archive,
+  BarChart3,
   BookOpen,
   CheckCircle2,
   ChevronDown,
@@ -59,14 +60,20 @@ import {
   QualityProblem,
   QualityProject,
   QualityReport,
+  ReportArtifact,
+  ReportBuildResponse,
+  ReportOptions,
+  ReportPayload,
+  ReportPreview,
+  ReportType,
   SmartPlan,
   SmartPlanStatus,
   SmartPlanTask
 } from "./api";
 
 type Mode = "historical_backfill" | "monthly_sync";
-type Tab = "projects" | "categories" | "catalog" | "plan" | "files" | "cube" | "export" | "classifier" | "quality";
-type DataTab = "files" | "cube" | "export" | "quality";
+type Tab = "projects" | "categories" | "catalog" | "plan" | "files" | "cube" | "reports" | "export" | "classifier" | "quality";
+type DataTab = "files" | "cube" | "reports" | "export" | "quality";
 type FileKindFilter = "all" | "raw" | "processed" | "classified" | "export" | "other";
 
 const defaultPipelineSettings: PipelineSettings = {
@@ -159,7 +166,8 @@ const statusLabels: Record<string, string> = {
   ready: "готово",
   missing: "нет файлов",
   stale: "устарело",
-  incomplete: "неполно"
+  incomplete: "неполно",
+  heavy: "тяжёлая"
 };
 
 const activeRunStatuses = new Set(["running", "pausing", "stopping"]);
@@ -395,7 +403,7 @@ function runTypeLabel(type?: string) {
 }
 
 function isDataTab(tab: Tab): tab is DataTab {
-  return tab === "files" || tab === "cube" || tab === "export" || tab === "quality";
+  return tab === "files" || tab === "cube" || tab === "reports" || tab === "export" || tab === "quality";
 }
 
 export function App() {
@@ -459,6 +467,16 @@ export function App() {
   const [exportTemplates, setExportTemplates] = useState<ExportTemplate[]>([]);
   const [exportTemplateName, setExportTemplateName] = useState("");
   const [exportConfirmLarge, setExportConfirmLarge] = useState(false);
+  const [reportOptions, setReportOptions] = useState<ReportOptions | null>(null);
+  const [reportType, setReportType] = useState<ReportType>("category_month");
+  const [reportCategoryKeys, setReportCategoryKeys] = useState<Set<string>>(new Set());
+  const [reportPeriodFrom, setReportPeriodFrom] = useState("");
+  const [reportPeriodTo, setReportPeriodTo] = useState("");
+  const [reportOutputDir, setReportOutputDir] = useState("");
+  const [reportFormat, setReportFormat] = useState<ExportFormat>("xlsx");
+  const [reportMaxRows, setReportMaxRows] = useState(5000);
+  const [reportPreview, setReportPreview] = useState<ReportPreview | null>(null);
+  const [reportArtifacts, setReportArtifacts] = useState<ReportArtifact[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -509,6 +527,11 @@ export function App() {
     if (tab !== "export") return;
     void loadExportOptions();
     void loadExportTemplates();
+  }, [tab, projectName]);
+
+  useEffect(() => {
+    if (tab !== "reports") return;
+    void loadReportOptions();
   }, [tab, projectName]);
 
   useEffect(() => {
@@ -647,6 +670,8 @@ export function App() {
     setRun(null);
     setSmartPlan(null);
     setProducts(null);
+    setReportPreview(null);
+    setReportArtifacts([]);
     await api.saveWorkflowSettings(workflowSettingsPayload(targetProjectName));
     const [runResponse, cubeResponse, fileResponse] = await Promise.all([
       api.listRuns(targetProjectName),
@@ -767,6 +792,24 @@ export function App() {
     }
   }
 
+  async function loadReportOptions() {
+    try {
+      const response = await api.getReportOptions(projectName || "mpstats");
+      setReportOptions(response);
+      setReportPeriodFrom((prev) => prev || response.period_from || "");
+      setReportPeriodTo((prev) => prev || response.period_to || "");
+      setReportOutputDir((prev) => prev || response.default_output_dir || "");
+      setReportCategoryKeys((prev) => {
+        const available = new Set(response.categories.map((category) => category.category_key));
+        const retained = [...prev].filter((key) => available.has(key));
+        const heavy = response.categories.filter((category) => category.is_heavy).map((category) => category.category_key);
+        return new Set(retained.length ? retained : heavy.length ? heavy : response.categories.map((category) => category.category_key));
+      });
+    } catch (exc) {
+      setError(`Отчёты: ${errorText(exc)}`);
+    }
+  }
+
   async function loadQualityProjects() {
     setQualityLoading(true);
     setQualityError(null);
@@ -859,6 +902,24 @@ export function App() {
       export_format: exportFormat,
       output_dir: exportOutputDir || null,
       confirm_large_export: exportConfirmLarge,
+      limit,
+      offset: 0
+    };
+  }
+
+  function buildReportPayload(limit = 100): ReportPayload {
+    if (!reportOptions) {
+      throw new Error("Настройки отчётов ещё не загружены.");
+    }
+    return {
+      project_name: projectName || "mpstats",
+      report_type: reportType,
+      category_keys: [...reportCategoryKeys],
+      period_from: reportPeriodFrom || null,
+      period_to: reportPeriodTo || null,
+      export_format: reportFormat,
+      output_dir: reportOutputDir || null,
+      max_rows: reportMaxRows,
       limit,
       offset: 0
     };
@@ -998,6 +1059,21 @@ export function App() {
     return response;
   }
 
+  async function loadReportPreview() {
+    setReportArtifacts([]);
+    const response = await api.previewReport(buildReportPayload(100));
+    setReportPreview(response);
+    return response;
+  }
+
+  async function buildReportFile() {
+    const response: ReportBuildResponse = await api.buildReport(buildReportPayload(100));
+    setReportArtifacts(response.artifacts);
+    setReportPreview((prev) => (prev ? { ...prev, total: response.source_total, warnings: response.warnings } : prev));
+    await refreshCube(projectName);
+    return response;
+  }
+
   async function loadCategorySource() {
     try {
       const response = await api.getCategorySource();
@@ -1117,9 +1193,27 @@ export function App() {
     });
   }
 
+  function toggleReportCategory(id: string) {
+    setReportCategoryKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setReportPreview(null);
+    setReportArtifacts([]);
+  }
+
   function toggleAllExportCategories() {
     const all = exportOptions?.categories.map((category) => category.category_key) ?? [];
     setExportCategoryKeys((prev) => (prev.size === all.length ? new Set() : new Set(all)));
+  }
+
+  function toggleAllReportCategories() {
+    const all = reportOptions?.categories.map((category) => category.category_key) ?? [];
+    setReportCategoryKeys((prev) => (prev.size === all.length ? new Set() : new Set(all)));
+    setReportPreview(null);
+    setReportArtifacts([]);
   }
 
   function toggleExportColumn(column: string) {
@@ -1142,6 +1236,18 @@ export function App() {
     setExportArtifacts([]);
     setExportProgress(null);
     setExportConfirmLarge(false);
+  }
+
+  function changeReportType(value: ReportType) {
+    setReportType(value);
+    setReportPreview(null);
+    setReportArtifacts([]);
+  }
+
+  function changeReportFormat(value: ExportFormat) {
+    setReportFormat(value);
+    setReportPreview(null);
+    setReportArtifacts([]);
   }
 
   function toggleExportSort(column: string, direction?: SortDirection) {
@@ -1556,7 +1662,7 @@ export function App() {
             <button className={tab === "projects" ? "active" : ""} title="Список проектов, выбор и удаление." onClick={() => { setTab("projects"); void loadProjects(); }}>Проекты</button>
             <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
             <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => setTab("categories")}>Категории</button>
-            <button className={isDataTab(tab) ? "active" : ""} title="Куб, файлы, выгрузка и проверка качества." onClick={() => setTab("cube")}>Данные</button>
+            <button className={isDataTab(tab) ? "active" : ""} title="Куб, отчёты, файлы, выгрузка и проверка качества." onClick={() => setTab("cube")}>Данные</button>
             <button className={tab === "classifier" ? "active" : ""} title="Правила классификатора без ручного JSON." onClick={() => setTab("classifier")}>Классификатор</button>
           </nav>
 
@@ -1792,6 +1898,33 @@ export function App() {
                 </div>
               ) : null}
             </section>
+          ) : null}
+
+          {tab === "reports" ? (
+            <ReportsWorkspace
+              options={reportOptions}
+              reportType={reportType}
+              selectedCategoryKeys={reportCategoryKeys}
+              periodFrom={reportPeriodFrom}
+              periodTo={reportPeriodTo}
+              outputDir={reportOutputDir}
+              exportFormat={reportFormat}
+              maxRows={reportMaxRows}
+              preview={reportPreview}
+              artifacts={reportArtifacts}
+              busy={Boolean(busy)}
+              onReportTypeChange={changeReportType}
+              onToggleCategory={toggleReportCategory}
+              onToggleAllCategories={toggleAllReportCategories}
+              onPeriodFromChange={setReportPeriodFrom}
+              onPeriodToChange={setReportPeriodTo}
+              onOutputDirChange={setReportOutputDir}
+              onExportFormatChange={changeReportFormat}
+              onMaxRowsChange={setReportMaxRows}
+              onReloadOptions={loadReportOptions}
+              onPreview={() => void runAction("Предпросмотр отчёта", loadReportPreview)}
+              onBuild={() => void runAction(`Отчёт ${reportFormat.toUpperCase()}`, buildReportFile)}
+            />
           ) : null}
 
           {tab === "export" ? (
@@ -2052,6 +2185,7 @@ function Toggle(props: { label: string; hint?: string; checked: boolean; onChang
 function DataSubnav(props: { activeTab: DataTab; onSelect: (tab: DataTab) => void }) {
   const items: Array<{ tab: DataTab; label: string; icon: ReactNode }> = [
     { tab: "cube", label: "Куб", icon: <Database size={16} /> },
+    { tab: "reports", label: "Отчёты", icon: <BarChart3 size={16} /> },
     { tab: "files", label: "Файлы", icon: <Archive size={16} /> },
     { tab: "export", label: "Выгрузка", icon: <Download size={16} /> },
     { tab: "quality", label: "Качество", icon: <CheckCircle2 size={16} /> }
@@ -2437,6 +2571,164 @@ function SmartPlanFilePill(props: { label: string; file: SmartPlanTask["raw_file
     <span className={`file-pill ${exists ? "exists" : "missing"}`} title={title}>
       {props.label}
     </span>
+  );
+}
+
+function ReportsWorkspace(props: {
+  options: ReportOptions | null;
+  reportType: ReportType;
+  selectedCategoryKeys: Set<string>;
+  periodFrom: string;
+  periodTo: string;
+  outputDir: string;
+  exportFormat: ExportFormat;
+  maxRows: number;
+  preview: ReportPreview | null;
+  artifacts: ReportArtifact[];
+  busy: boolean;
+  onReportTypeChange: (value: ReportType) => void;
+  onToggleCategory: (id: string) => void;
+  onToggleAllCategories: () => void;
+  onPeriodFromChange: (value: string) => void;
+  onPeriodToChange: (value: string) => void;
+  onOutputDirChange: (value: string) => void;
+  onExportFormatChange: (value: ExportFormat) => void;
+  onMaxRowsChange: (value: number) => void;
+  onReloadOptions: () => void;
+  onPreview: () => void;
+  onBuild: () => void;
+}) {
+  const options = props.options;
+  const selectedCategoryCount = options?.categories.filter((category) => props.selectedCategoryKeys.has(category.category_key)).length ?? 0;
+  const heavyCategories = options?.categories.filter((category) => category.is_heavy) ?? [];
+  const selectedReport = options?.reports.find((report) => report.type === props.reportType) ?? options?.reports[0] ?? null;
+  return (
+    <section className="panel stage-panel reports-panel">
+      <SectionTitle
+        icon={<BarChart3 />}
+        title="Отчёты"
+        meta={props.preview ? `${formatNumber(props.preview.total)} строк` : `${heavyCategories.length} тяжёлых категорий`}
+        hint="Отчёты строятся SQL-агрегацией из куба. Excel получает готовую сводную таблицу, а не миллионы raw-строк."
+      />
+
+      <div className="reports-overview">
+        <Metric label="Категорий в кубе" value={String(options?.categories.length ?? 0)} />
+        <Metric label="Тяжёлых" value={String(heavyCategories.length)} />
+        <Metric label="Выбрано" value={String(selectedCategoryCount)} />
+        <Metric label="Порог среза" value={formatNumber(options?.heavy_slice_rows_limit ?? 0)} />
+      </div>
+
+      {heavyCategories.length ? (
+        <div className="heavy-category-list">
+          <div className="selector-head">
+            <strong>Тяжёлые категории</strong>
+            <span>{formatNumber(heavyCategories.reduce((total, category) => total + Number(category.rows_count || 0), 0))} строк</span>
+          </div>
+          <FilterableTable
+            rows={heavyCategories}
+            rowKey={(category) => category.category_key}
+            emptyText="Тяжёлых категорий пока нет."
+            columns={[
+              { id: "status", label: "Режим", value: () => "heavy", render: () => <Badge value="heavy" /> },
+              { id: "category", label: "Категория", value: (category) => category.category_name, title: (category) => category.heavy_reason ?? category.category_name },
+              { id: "rows", label: "Строк", value: (category) => category.rows_count, render: (category) => formatNumber(category.rows_count), numeric: true },
+              { id: "slices", label: "Срезов", value: (category) => category.slices_count, numeric: true },
+              { id: "reports", label: "Отчёты", value: (category) => category.reports_built_at ?? "", render: (category) => category.reports_built_at ? formatDateTime(category.reports_built_at) : "доступны" }
+            ]}
+          />
+        </div>
+      ) : (
+        <div className="export-warning">Тяжёлых категорий пока не найдено. Отчёты всё равно можно строить по любым сохранённым срезам куба.</div>
+      )}
+
+      <div className="reports-settings">
+        <div className="reports-main-settings">
+          <div className="form-grid two-cols">
+            <label>
+              Тип отчёта
+              <select value={props.reportType} onChange={(event) => props.onReportTypeChange(event.target.value as ReportType)}>
+                {options?.reports.map((report) => <option key={report.type} value={report.type}>{report.label}</option>)}
+              </select>
+            </label>
+            <label>
+              Топ SKU, строк
+              <input type="number" min={100} max={100000} value={props.maxRows} onChange={(event) => props.onMaxRowsChange(Number(event.target.value))} />
+            </label>
+            <label>
+              Период с
+              <input type="month" value={props.periodFrom} onChange={(event) => props.onPeriodFromChange(event.target.value)} min={options?.period_from ?? undefined} max={options?.period_to ?? undefined} />
+            </label>
+            <label>
+              Период по
+              <input type="month" value={props.periodTo} onChange={(event) => props.onPeriodToChange(event.target.value)} min={options?.period_from ?? undefined} max={options?.period_to ?? undefined} />
+            </label>
+          </div>
+          {selectedReport ? <p className="reports-description">{selectedReport.description}</p> : null}
+          <label>
+            Папка
+            <input value={props.outputDir} onChange={(event) => props.onOutputDirChange(event.target.value)} placeholder={options?.default_output_dir || "data/projects/.../reports"} />
+          </label>
+          <div className="export-mode-row">
+            <div className="format-switch" aria-label="Формат отчёта">
+              <button className={props.exportFormat === "xlsx" ? "active" : ""} type="button" onClick={() => props.onExportFormatChange("xlsx")}>XLSX</button>
+              <button className={props.exportFormat === "csv" ? "active" : ""} type="button" onClick={() => props.onExportFormatChange("csv")}>CSV</button>
+            </div>
+            <button className="ghost-button" onClick={props.onReloadOptions}><RefreshCcw size={17} />Обновить</button>
+            <button className="ghost-button" disabled={props.busy || !options} onClick={props.onPreview}><Table2 size={17} />Предпросмотр</button>
+            <button className="primary-inline-button" disabled={props.busy || !props.preview} onClick={props.onBuild}>
+              <Download size={17} />
+              {props.exportFormat.toUpperCase()}
+            </button>
+          </div>
+        </div>
+
+        <div className="export-selector reports-category-selector">
+          <div className="selector-head">
+            <strong>Категории</strong>
+            <button className="tiny-button" onClick={props.onToggleAllCategories}>{selectedCategoryCount === (options?.categories.length ?? 0) ? "снять" : "все"}</button>
+          </div>
+          <div className="selector-list">
+            {options?.categories.map((category) => (
+              <label className="check-row export-check-row" key={category.category_key}>
+                <input type="checkbox" checked={props.selectedCategoryKeys.has(category.category_key)} onChange={() => props.onToggleCategory(category.category_key)} />
+                <span>
+                  <strong>{category.category_name}</strong>
+                  <small>{category.is_heavy ? "тяжёлая · " : ""}{formatNumber(category.rows_count)} строк · {category.slices_count} срезов</small>
+                </span>
+              </label>
+            ))}
+            {options && options.categories.length === 0 ? <Empty text="В кубе нет категорий для отчётов." /> : null}
+          </div>
+        </div>
+      </div>
+
+      {options?.warnings.length ? <div className="export-warning">{options.warnings.join(" ")}</div> : null}
+      {props.preview?.warnings.length ? <div className="export-warning">{props.preview.warnings.join(" ")}</div> : null}
+
+      {props.preview ? (
+        <div className="reports-preview">
+          <h3>{props.preview.report_label}: {formatNumber(props.preview.total)} агрегированных строк</h3>
+          <SimpleTable columns={props.preview.columns} rows={props.preview.rows} />
+        </div>
+      ) : <Empty text="Собери предпросмотр, чтобы увидеть готовую агрегированную таблицу." />}
+
+      {props.artifacts.length ? (
+        <div className="export-artifacts">
+          <h3>Готовые отчёты</h3>
+          <div className="artifact-list">
+            {props.artifacts.map((artifact) => (
+              <a className="artifact-row" href={api.reportFileUrl(artifact.path)} key={artifact.path}>
+                <FileSpreadsheet size={17} />
+                <span>
+                  <strong>{artifact.filename}</strong>
+                  <small>{artifact.format.toUpperCase()} · {artifact.report_label} · {formatNumber(artifact.rows)} строк</small>
+                </span>
+              </a>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -3364,6 +3656,20 @@ function CubeTable(props: { items: CubeItem[]; busy: boolean; onDelete: (item: C
         { id: "marketplace", label: "Marketplace", value: (item) => item.marketplace },
         { id: "category", label: "Категория", value: (item) => item.category_name },
         { id: "rows", label: "Строк", value: (item) => item.rows_count, numeric: true },
+        {
+          id: "mode",
+          label: "Режим",
+          value: (item) => item.is_heavy ? "heavy" : "standard",
+          render: (item) => item.is_heavy ? <Badge value="heavy" /> : <span className="muted-cell">standard</span>,
+          title: (item) => item.heavy_reason ?? "Обычный срез."
+        },
+        {
+          id: "reports",
+          label: "Отчёты",
+          value: (item) => item.reports_built_at ?? "",
+          render: (item) => item.reports_built_at ? formatDateTime(item.reports_built_at) : item.is_heavy ? "доступны" : "-",
+          title: (item) => item.reports_built_at ? `Последний отчёт: ${formatDateTime(item.reports_built_at)}` : "Отчёт можно построить во вкладке Данные -> Отчёты."
+        },
         {
           id: "days",
           label: "Дней",

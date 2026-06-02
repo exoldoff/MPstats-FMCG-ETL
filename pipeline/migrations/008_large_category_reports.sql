@@ -1,0 +1,4 @@
+ALTER TABLE cube_registry ADD COLUMN IF NOT EXISTS data_mode VARCHAR DEFAULT 'standard';
+ALTER TABLE cube_registry ADD COLUMN IF NOT EXISTS is_heavy BOOLEAN DEFAULT false;
+ALTER TABLE cube_registry ADD COLUMN IF NOT EXISTS heavy_reason VARCHAR;
+ALTER TABLE cube_registry ADD COLUMN IF NOT EXISTS reports_built_at TIMESTAMP;

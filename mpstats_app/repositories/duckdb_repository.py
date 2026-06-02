@@ -22,6 +22,12 @@ EXPORT_METADATA_COLUMNS = ("__project_name", "__year", "__month", "__marketplace
 TEXT_DB_TYPES = ("CHAR", "STRING", "TEXT", "VARCHAR")
 CUBE_SALES_FILTER_COLUMNS = ("Продажи, шт", "Продажи", "sales")
 CUBE_VOLUME_FILTER_COLUMNS = ("Объем, кг", "Объём, кг", "Объем, т", "Объём, т", "Объем", "Объём", "volume_kg", "volume_t", "volume")
+HEAVY_SLICE_ROWS_LIMIT = 250_000
+HEAVY_CATEGORY_ROWS_LIMIT = 1_000_000
+REPORT_REVENUE_COLUMNS = ("Выручка, руб", "Выручка", "revenue")
+REPORT_VOLUME_KG_COLUMNS = ("Объем, кг", "Объём, кг", "volume_kg")
+REPORT_VOLUME_T_COLUMNS = ("Объем, т", "Объём, т", "volume_t")
+REPORT_CLASSIFICATION_COLUMNS = ("Тип", "Подкатегория", "Вид", "Вид мяса", "Сегмент")
 
 
 def _table_column_types(con: Any, table_name: str) -> dict[str, str]:
@@ -814,9 +820,10 @@ class DuckDbAppRepository:
                     id, project_name, year, month, marketplace, marketplace_code,
                     category_key, category_name, rows_count, saved_to_db_at,
                     source_processed_file_path, file_hash, days_loaded,
-                    days_in_month, data_actual_until
+                    days_in_month, data_actual_until, data_mode, is_heavy,
+                    heavy_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (project_name, year, month, marketplace_code, category_key) DO UPDATE SET
                     marketplace = EXCLUDED.marketplace,
                     category_name = EXCLUDED.category_name,
@@ -826,7 +833,10 @@ class DuckDbAppRepository:
                     file_hash = EXCLUDED.file_hash,
                     days_loaded = EXCLUDED.days_loaded,
                     days_in_month = EXCLUDED.days_in_month,
-                    data_actual_until = EXCLUDED.data_actual_until
+                    data_actual_until = EXCLUDED.data_actual_until,
+                    data_mode = EXCLUDED.data_mode,
+                    is_heavy = EXCLUDED.is_heavy,
+                    heavy_reason = EXCLUDED.heavy_reason
                 """,
                 [
                     entry_id,
@@ -843,6 +853,9 @@ class DuckDbAppRepository:
                     entry.get("days_loaded"),
                     entry.get("days_in_month"),
                     entry.get("data_actual_until"),
+                    entry.get("data_mode") or "standard",
+                    bool(entry.get("is_heavy", False)),
+                    entry.get("heavy_reason"),
                 ],
             )
         return self.get_cube_entry(
@@ -854,6 +867,7 @@ class DuckDbAppRepository:
         ) or {}
 
     def list_cube_registry(self, *, project_name: str, limit: int = 500) -> list[dict[str, Any]]:
+        self.refresh_large_category_flags(project_name=project_name)
         return self._fetch_records(
             """
             SELECT *
@@ -989,6 +1003,11 @@ class DuckDbAppRepository:
 
         for run_id in run_ids:
             self.refresh_pipeline_run_counts(run_id)
+        if deleted_entry:
+            self.refresh_large_category_flags(
+                project_name=str(deleted_entry["project_name"]),
+                category_keys=[str(deleted_entry["category_key"])],
+            )
         return {"entry_id": entry_id, "deleted": counts, "entry": deleted_entry}
 
     def mark_project_file_deleted(self, *, project_name: str, file_path: str, file_kind: str) -> dict[str, int]:
@@ -1529,6 +1548,184 @@ class DuckDbAppRepository:
             "run_id": effective_run_id,
         }
 
+    def refresh_large_category_flags(
+        self,
+        *,
+        project_name: str,
+        category_keys: list[str] | None = None,
+        slice_limit: int = HEAVY_SLICE_ROWS_LIMIT,
+        category_limit: int = HEAVY_CATEGORY_ROWS_LIMIT,
+    ) -> list[dict[str, Any]]:
+        where = ["project_name = ?"]
+        params: list[Any] = [project_name]
+        if category_keys:
+            clean_keys = sorted({str(key) for key in category_keys if str(key).strip()})
+            if clean_keys:
+                placeholders = ", ".join("?" for _ in clean_keys)
+                where.append(f"category_key IN ({placeholders})")
+                params.extend(clean_keys)
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            summaries = con.execute(
+                f"""
+                SELECT category_key, SUM(rows_count) AS category_rows_count
+                FROM cube_registry
+                WHERE {" AND ".join(where)}
+                GROUP BY category_key
+                """,
+                params,
+            ).fetchall()
+            for category_key, total_rows in summaries:
+                total = int(total_rows or 0)
+                con.execute(
+                    """
+                    UPDATE cube_registry
+                    SET
+                        is_heavy = rows_count >= ? OR ? >= ?,
+                        data_mode = CASE WHEN rows_count >= ? OR ? >= ? THEN 'heavy' ELSE 'standard' END,
+                        heavy_reason = CASE
+                            WHEN rows_count >= ? THEN 'Срез содержит ' || CAST(rows_count AS VARCHAR) || ' строк: raw XLSX отключён, используй агрегированные отчёты.'
+                            WHEN ? >= ? THEN 'Категория содержит ' || CAST(? AS VARCHAR) || ' строк суммарно: используй агрегированные отчёты вместо raw XLSX.'
+                            ELSE NULL
+                        END
+                    WHERE project_name = ? AND category_key = ?
+                    """,
+                    [
+                        int(slice_limit),
+                        total,
+                        int(category_limit),
+                        int(slice_limit),
+                        total,
+                        int(category_limit),
+                        int(slice_limit),
+                        total,
+                        int(category_limit),
+                        total,
+                        project_name,
+                        str(category_key),
+                    ],
+                )
+        return self.large_category_summary(project_name=project_name)
+
+    def large_category_summary(self, *, project_name: str) -> list[dict[str, Any]]:
+        rows = self._fetch_records(
+            """
+            SELECT
+                project_name,
+                category_key,
+                MIN(category_name) AS category_name,
+                MIN(marketplace) AS marketplace,
+                MIN(marketplace_code) AS marketplace_code,
+                COUNT(*) AS slices_count,
+                SUM(rows_count) AS rows_count,
+                MAX(rows_count) AS max_slice_rows,
+                BOOL_OR(COALESCE(is_heavy, false)) AS is_heavy,
+                MAX(saved_to_db_at) AS latest_saved_at,
+                MAX(reports_built_at) AS reports_built_at,
+                MAX(heavy_reason) AS heavy_reason
+            FROM cube_registry
+            WHERE project_name = ?
+            GROUP BY project_name, category_key
+            ORDER BY is_heavy DESC, rows_count DESC, category_name, marketplace
+            """,
+            [project_name],
+        )
+        for row in rows:
+            row["available_reports"] = ["category_month", "brand_month", "classification_month", "top_sku"]
+        return rows
+
+    def report_options(self, *, table_name: str, project_name: str) -> dict[str, Any]:
+        if not self.table_exists(table_name):
+            return {
+                "categories": [],
+                "period_from": None,
+                "period_to": None,
+                "columns": [],
+                "warnings": [f"Таблица {table_name} не найдена."],
+            }
+        columns = self.table_columns(table_name)
+        warnings: list[str] = []
+        missing = [column for column in EXPORT_METADATA_COLUMNS if column not in columns]
+        if missing:
+            warnings.append(
+                "Агрегированные отчёты доступны после сохранения данных через smart pipeline: не хватает "
+                + ", ".join(missing)
+                + "."
+            )
+            return {"categories": [], "period_from": None, "period_to": None, "columns": columns, "warnings": warnings}
+        self.refresh_large_category_flags(project_name=project_name)
+        period = self._export_period_from_cube(project_name=project_name)
+        min_period = int(period["min_period"]) if period and period.get("min_period") is not None else None
+        max_period = int(period["max_period"]) if period and period.get("max_period") is not None else None
+        return {
+            "categories": self.large_category_summary(project_name=project_name),
+            "period_from": _period_index_to_label(min_period) if min_period else None,
+            "period_to": _period_index_to_label(max_period) if max_period else None,
+            "columns": [column for column in columns if not column.startswith("__")],
+            "warnings": warnings,
+        }
+
+    def count_report_rows(
+        self,
+        *,
+        table_name: str,
+        project_name: str,
+        report_type: str,
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+    ) -> int:
+        query, params, _ = self._report_query_sql(
+            table_name=table_name,
+            project_name=project_name,
+            report_type=report_type,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+        )
+        row = self._fetch_one(f"SELECT COUNT(*) AS total FROM ({query}) report_rows", params)
+        return int(row["total"]) if row else 0
+
+    def fetch_report_dataframe(
+        self,
+        *,
+        table_name: str,
+        project_name: str,
+        report_type: str,
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+        limit: int | None = 500,
+        offset: int = 0,
+    ) -> pd.DataFrame:
+        query, params, _ = self._report_query_sql(
+            table_name=table_name,
+            project_name=project_name,
+            report_type=report_type,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+        )
+        if limit is not None:
+            query = f"{query} LIMIT ? OFFSET ?"
+            params = [*params, max(1, int(limit)), max(0, int(offset))]
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            return con.execute(query, params).fetchdf()
+
+    def mark_reports_built(self, *, project_name: str, category_keys: list[str] | None = None) -> None:
+        where = ["project_name = ?"]
+        params: list[Any] = [project_name]
+        if category_keys:
+            clean_keys = sorted({str(key) for key in category_keys if str(key).strip()})
+            if clean_keys:
+                placeholders = ", ".join("?" for _ in clean_keys)
+                where.append(f"category_key IN ({placeholders})")
+                params.extend(clean_keys)
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            con.execute(f"UPDATE cube_registry SET reports_built_at = now() WHERE {' AND '.join(where)}", params)
+
     def export_options(self, *, table_name: str, project_name: str) -> dict[str, Any]:
         quote_identifier(table_name)
         if not self.table_exists(table_name):
@@ -1766,6 +1963,138 @@ class DuckDbAppRepository:
                 """,
                 [*params, max(1, int(limit)), max(0, int(offset))],
             ).fetchdf()
+
+    def _report_query_sql(
+        self,
+        *,
+        table_name: str,
+        project_name: str,
+        report_type: str,
+        category_keys: list[str] | None,
+        period_from_index: int | None,
+        period_to_index: int | None,
+    ) -> tuple[str, list[Any], list[str]]:
+        columns = self.table_columns(table_name)
+        self._require_export_metadata(columns)
+        clean_report_type = report_type if report_type in {"category_month", "brand_month", "classification_month", "top_sku"} else "category_month"
+        where_sql, params = self._export_where_sql(
+            columns=columns,
+            project_name=project_name,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+            filters=[],
+            excluded_row_hashes=[],
+        )
+
+        year_expr = f"CAST({quote_duckdb_name('__year')} AS INTEGER)"
+        month_expr = f"CAST({quote_duckdb_name('__month')} AS INTEGER)"
+        marketplace_expr = self._report_text_expr(columns, "Маркетплейс", fallback_column="__marketplace_code")
+        category_expr = self._report_text_expr(columns, "Категория", fallback_column="__category_key")
+        dimensions: list[tuple[str, str]] = [
+            ("Период", f"printf('%04d-%02d', {year_expr}, {month_expr})"),
+            ("Год", year_expr),
+            ("Месяц", month_expr),
+            ("Маркетплейс", marketplace_expr),
+            ("Категория", category_expr),
+        ]
+        if clean_report_type == "brand_month":
+            dimensions.extend(self._report_optional_dimensions(columns, ("Бренд",)))
+        elif clean_report_type == "classification_month":
+            dimensions.extend(self._report_optional_dimensions(columns, REPORT_CLASSIFICATION_COLUMNS))
+        elif clean_report_type == "top_sku":
+            dimensions.extend(self._report_optional_dimensions(columns, ("SKU", "Название", "Бренд", "Тип", "Подкатегория")))
+
+        sales_expr = self._report_sum_expr(columns, CUBE_SALES_FILTER_COLUMNS)
+        revenue_expr = self._report_sum_expr(columns, REPORT_REVENUE_COLUMNS)
+        volume_expr = self._report_volume_kg_expr(columns)
+        sku_expr = (
+            f"COUNT(DISTINCT NULLIF(TRIM(CAST({quote_duckdb_name('SKU')} AS VARCHAR)), ''))"
+            if "SKU" in columns
+            else "CAST(0 AS BIGINT)"
+        )
+        select_parts = [f"{expr} AS {quote_duckdb_name(alias)}" for alias, expr in dimensions]
+        metric_parts = [
+            f"COUNT(*) AS {quote_duckdb_name('Строк')}",
+            f"{sku_expr} AS {quote_duckdb_name('Уникальных SKU')}",
+            f"{sales_expr} AS {quote_duckdb_name('Продажи, шт')}",
+            f"{revenue_expr} AS {quote_duckdb_name('Выручка, руб')}",
+            f"{volume_expr} AS {quote_duckdb_name('Объем, кг')}",
+            (
+                f"CASE WHEN {sales_expr} > 0 THEN {revenue_expr} / NULLIF({sales_expr}, 0) ELSE NULL END "
+                f"AS {quote_duckdb_name('Средняя цена, руб')}"
+            ),
+            (
+                f"CASE WHEN {volume_expr} > 0 THEN {revenue_expr} / NULLIF({volume_expr}, 0) ELSE NULL END "
+                f"AS {quote_duckdb_name('Цена за кг')}"
+            ),
+        ]
+        group_parts = [expr for _, expr in dimensions]
+        group_sql = ", ".join(group_parts)
+        order_sql = self._report_order_sql(clean_report_type, [alias for alias, _ in dimensions])
+        query = f"""
+            SELECT {", ".join(select_parts + metric_parts)}
+            FROM {quote_identifier(table_name)}
+            {where_sql}
+            GROUP BY {group_sql}
+            {order_sql}
+        """
+        return query, params, [alias for alias, _ in dimensions] + [
+            "Строк",
+            "Уникальных SKU",
+            "Продажи, шт",
+            "Выручка, руб",
+            "Объем, кг",
+            "Средняя цена, руб",
+            "Цена за кг",
+        ]
+
+    def _report_optional_dimensions(self, columns: list[str], requested: tuple[str, ...]) -> list[tuple[str, str]]:
+        return [(column, self._report_text_expr(columns, column)) for column in requested if column in columns]
+
+    def _report_text_expr(self, columns: list[str], column: str, *, fallback_column: str | None = None) -> str:
+        if column in columns:
+            base = f"NULLIF(TRIM(CAST({quote_duckdb_name(column)} AS VARCHAR)), '')"
+        else:
+            base = "NULL"
+        if fallback_column and fallback_column in columns:
+            fallback = f"NULLIF(TRIM(CAST({quote_duckdb_name(fallback_column)} AS VARCHAR)), '')"
+            return f"COALESCE({base}, {fallback}, 'Не заполнено')"
+        return f"COALESCE({base}, 'Не заполнено')"
+
+    def _report_sum_expr(self, columns: list[str], candidates: tuple[str, ...]) -> str:
+        column = next((candidate for candidate in candidates if candidate in columns), None)
+        if not column:
+            return "CAST(0 AS DOUBLE)"
+        return f"COALESCE(SUM({self._report_number_expr(column)}), 0)"
+
+    def _report_volume_kg_expr(self, columns: list[str]) -> str:
+        kg_column = next((candidate for candidate in REPORT_VOLUME_KG_COLUMNS if candidate in columns), None)
+        if kg_column:
+            return f"COALESCE(SUM({self._report_number_expr(kg_column)}), 0)"
+        ton_column = next((candidate for candidate in REPORT_VOLUME_T_COLUMNS if candidate in columns), None)
+        if ton_column:
+            return f"COALESCE(SUM({self._report_number_expr(ton_column)} * 1000), 0)"
+        return "CAST(0 AS DOUBLE)"
+
+    @staticmethod
+    def _report_number_expr(column: str) -> str:
+        quoted = quote_duckdb_name(column)
+        nbsp = "\u00a0"
+        return (
+            "TRY_CAST("
+            f"REPLACE(REPLACE(REPLACE(CAST({quoted} AS VARCHAR), '{nbsp}', ''), ' ', ''), ',', '.') "
+            "AS DOUBLE)"
+        )
+
+    @staticmethod
+    def _report_order_sql(report_type: str, dimensions: list[str]) -> str:
+        if report_type == "top_sku":
+            return f"ORDER BY {quote_duckdb_name('Выручка, руб')} DESC NULLS LAST, {quote_duckdb_name('Продажи, шт')} DESC NULLS LAST"
+        order_columns = [column for column in ("Год", "Месяц", "Категория", "Маркетплейс", "Бренд", "Тип", "Подкатегория") if column in dimensions]
+        if not order_columns:
+            return ""
+        return "ORDER BY " + ", ".join(quote_duckdb_name(column) for column in order_columns)
 
     def _require_export_metadata(self, columns: list[str]) -> None:
         missing = [column for column in EXPORT_METADATA_COLUMNS if column not in columns]

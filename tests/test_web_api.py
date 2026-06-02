@@ -693,6 +693,128 @@ class WebApiTest(unittest.TestCase):
                     ["lemon-oz", "lemon-oz", "soap-wb"],
                 )
 
+    def test_large_category_reports_build_aggregated_excel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            source_file = root / "lemon.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Лимонная кислота",
+                            "SKU": "sku-1",
+                            "Название": "лимон 1 кг",
+                            "Бренд": "Brand A",
+                            "Тип": "Кислота",
+                            "Продажи, шт": 3,
+                            "Выручка, руб": 30,
+                            "Объем, кг": 1.5,
+                        },
+                        {
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Лимонная кислота",
+                            "SKU": "sku-2",
+                            "Название": "лимон 2 кг",
+                            "Бренд": "Brand A",
+                            "Тип": "Кислота",
+                            "Продажи, шт": 5,
+                            "Выручка, руб": 50,
+                            "Объем, кг": 2.5,
+                        },
+                    ]
+                ),
+                source_file,
+            )
+            repository.import_products_file_idempotent(
+                run_id="run-report-1",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="lemon-oz",
+            )
+            repository.upsert_cube_entry(
+                {
+                    "project_name": "unit",
+                    "year": 2025,
+                    "month": 1,
+                    "marketplace": "Ozon",
+                    "marketplace_code": "oz",
+                    "category_key": "lemon-oz",
+                    "category_name": "Лимонная кислота",
+                    "rows_count": 1_200_000,
+                    "days_loaded": 31,
+                    "days_in_month": 31,
+                    "data_actual_until": "2025-01-31",
+                    "source_processed_file_path": str(source_file),
+                    "file_hash": "hash",
+                }
+            )
+
+            app = create_app(settings, start_workers=False)
+            with TestClient(app) as client:
+                options = client.get("/api/reports/options", params={"project_name": "unit"})
+                self.assertEqual(options.status_code, 200)
+                category = options.json()["categories"][0]
+                self.assertTrue(category["is_heavy"])
+                self.assertEqual(category["rows_count"], 1_200_000)
+                self.assertIn("category_month", category["available_reports"])
+
+                preview_payload = {
+                    "project_name": "unit",
+                    "report_type": "brand_month",
+                    "category_keys": ["lemon-oz"],
+                    "period_from": "2025-01",
+                    "period_to": "2025-01",
+                    "export_format": "xlsx",
+                    "max_rows": 5000,
+                    "limit": 100,
+                    "offset": 0,
+                }
+                preview = client.post("/api/reports/preview", json=preview_payload)
+                self.assertEqual(preview.status_code, 200)
+                preview_payload_response = preview.json()
+                self.assertEqual(preview_payload_response["total"], 1)
+                self.assertEqual(preview_payload_response["rows"][0]["Бренд"], "Brand A")
+                self.assertEqual(preview_payload_response["rows"][0]["Продажи, шт"], 8)
+                self.assertEqual(preview_payload_response["rows"][0]["Выручка, руб"], 80)
+                self.assertEqual(preview_payload_response["rows"][0]["Объем, кг"], 4)
+
+                built = client.post(
+                    "/api/reports/build",
+                    json={**preview_payload, "output_dir": str(root / "reports")},
+                )
+                self.assertEqual(built.status_code, 200)
+                artifact = built.json()["artifacts"][0]
+                xlsx_path = Path(artifact["path"])
+                self.assertTrue(xlsx_path.exists())
+                self.assertEqual(xlsx_path.parent, (root / "reports" / "unit").resolve())
+
+                from openpyxl import load_workbook
+
+                workbook = load_workbook(xlsx_path, read_only=False)
+                worksheet = workbook.active
+                headers = [cell.value for cell in worksheet[1]]
+                self.assertIn("Бренд", headers)
+                self.assertIn("Продажи, шт", headers)
+                downloaded = client.get("/api/reports/download-file", params={"path": str(xlsx_path)})
+                self.assertEqual(downloaded.status_code, 200)
+
+                cube = client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"})
+                self.assertEqual(cube.status_code, 200)
+                cube_item = cube.json()["items"][0]
+                self.assertTrue(cube_item["is_heavy"])
+                self.assertEqual(cube_item["data_mode"], "heavy")
+                self.assertIsNotNone(cube_item["reports_built_at"])
+
     def test_workflow_categories_classify_preview_and_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -207,3 +207,18 @@ class ExportTemplatePayload(ProjectPayload):
     split_by_category: bool = False
     export_format: str = Field(default="xlsx", pattern="^(xlsx|csv)$")
     output_dir: str | None = None
+
+
+class ReportPreviewPayload(ProjectPayload):
+    report_type: str = Field(default="category_month", pattern="^(category_month|brand_month|classification_month|top_sku)$")
+    category_keys: list[str] = Field(default_factory=list)
+    period_from: str | None = None
+    period_to: str | None = None
+    export_format: str = Field(default="xlsx", pattern="^(xlsx|csv)$")
+    max_rows: int = Field(default=5000, ge=100, le=100_000)
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class ReportBuildPayload(ReportPreviewPayload):
+    output_dir: str | None = None
