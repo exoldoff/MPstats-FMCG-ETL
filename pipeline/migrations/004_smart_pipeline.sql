@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     selected_category_ids_json VARCHAR,
     settings_json VARCHAR,
     pause_requested BOOLEAN DEFAULT false,
+    stop_requested BOOLEAN DEFAULT false,
     created_at TIMESTAMP DEFAULT current_timestamp,
     updated_at TIMESTAMP DEFAULT current_timestamp,
     started_at TIMESTAMP,

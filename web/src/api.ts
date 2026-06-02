@@ -522,6 +522,7 @@ export const api = {
   startRun: (runId: string, wait = false) =>
     request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/start`, { method: "POST", body: JSON.stringify({ wait }) }),
   pauseRun: (runId: string) => request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/pause`, { method: "POST" }),
+  stopRun: (runId: string) => request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/stop`, { method: "POST" }),
   resumeRun: (runId: string, wait = false) =>
     request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/resume`, { method: "POST", body: JSON.stringify({ wait }) }),
   retryErrors: (runId: string, wait = false) =>

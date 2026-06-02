@@ -756,6 +756,15 @@ select {
   background: #f2f5f6;
 }
 
+.action-button.danger-action {
+  color: #7b2424;
+  background: #f8e5e5;
+}
+
+.action-button.danger-action svg {
+  color: #8b2727;
+}
+
 .action-button svg {
   width: 21px;
   min-width: 21px;
@@ -2202,12 +2211,14 @@ th {
 .badge.classifying,
 .badge.saving_to_db,
 .badge.pausing,
+.badge.stopping,
 .badge.stale {
   color: #6d4a11;
   background: #fff0cf;
 }
 
 .badge.paused,
+.badge.stopped,
 .badge.no_data,
 .badge.skipped,
 .badge.missing,

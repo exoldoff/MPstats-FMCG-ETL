@@ -43,8 +43,23 @@ def connect(db_path: str | Path) -> duckdb.DuckDBPyConnection:
 
 
 def apply_migrations(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name VARCHAR PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT current_timestamp
+        )
+        """
+    )
+    applied = {
+        str(row[0])
+        for row in con.execute("SELECT name FROM schema_migrations").fetchall()
+    }
     for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if migration.name in applied:
+            continue
         con.execute(migration.read_text(encoding="utf-8"))
+        con.execute("INSERT INTO schema_migrations (name) VALUES (?)", [migration.name])
 
 
 def table_exists(con: duckdb.DuckDBPyConnection, table_name: str) -> bool:
@@ -69,7 +84,7 @@ def list_tables(db_path: str | Path, *, include_internal: bool = False) -> pd.Da
             WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
         """
         if not include_internal:
-            query += " AND table_name <> 'pipeline_loads'"
+            query += " AND table_name NOT IN ('pipeline_loads', 'schema_migrations')"
         query += " ORDER BY table_name"
         return con.execute(query).fetchdf()
 

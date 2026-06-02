@@ -150,6 +150,8 @@ const statusLabels: Record<string, string> = {
   running: "идёт",
   pausing: "пауза...",
   paused: "пауза",
+  stopping: "остановка...",
+  stopped: "остановлено",
   succeeded: "готово",
   completed_with_errors: "с ошибками",
   ready: "готово",
@@ -158,7 +160,7 @@ const statusLabels: Record<string, string> = {
   incomplete: "неполно"
 };
 
-const activeRunStatuses = new Set(["running", "pausing"]);
+const activeRunStatuses = new Set(["running", "pausing", "stopping"]);
 const passiveCubeActions = new Set(["Предпросмотр БД", "Поиск в БД"]);
 
 function isActiveRunStatus(status: string | null | undefined) {
@@ -1319,12 +1321,14 @@ export function App() {
   }
 
   const runIsActive = isActiveRunStatus(run?.status);
+  const runIsRunning = run?.status === "running";
   const runIsPaused = run?.status === "paused";
   const runHasTasks = Boolean(run?.id && (run.total_tasks ?? 0) > 0);
   const runHasRemainingWork = Boolean(run?.id && ((run.remaining_tasks ?? 0) > 0 || (run.failed_tasks ?? 0) > 0));
   const canCreatePlan = !busy && !runIsActive && (mode === "monthly_sync" || (selected.size > 0 && monthsCount > 0));
   const canStartRun = !busy && !runIsActive && runHasTasks && runHasRemainingWork;
-  const canPauseRun = !busy && Boolean(run?.id) && runIsActive;
+  const canPauseRun = !busy && Boolean(run?.id) && runIsRunning;
+  const canStopRun = !busy && Boolean(run?.id) && (runIsRunning || run?.status === "pausing" || runIsPaused);
   const canResumeRun = !busy && Boolean(run?.id) && runIsPaused;
   const canRetryErrors = !busy && Boolean(run?.id) && !runIsActive && (run?.failed_tasks ?? 0) > 0;
   const canRebuildCube = !busy && runHasTasks && !runIsActive;
@@ -1869,6 +1873,10 @@ export function App() {
               <button className="action-button" disabled={!canPauseRun} onClick={() => run?.id && void runAction("Пауза", () => api.pauseRun(run.id), setRun)}>
                 <Pause size={20} />
                 <span><strong>Пауза</strong><small>Остановится между стадиями</small></span>
+              </button>
+              <button className="action-button danger-action" disabled={!canStopRun} onClick={() => run?.id && void runAction("Остановка", () => api.stopRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+                <X size={20} />
+                <span><strong>Остановить</strong><small>Завершить текущий pipeline</small></span>
               </button>
               <button className="action-button" disabled={!canResumeRun} onClick={() => run?.id && void runAction("Продолжение", () => api.resumeRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
                 <SkipForward size={20} />

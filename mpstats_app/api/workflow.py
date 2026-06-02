@@ -265,6 +265,14 @@ def pause_pipeline_run(
     return _handle(lambda: pipeline.pause_run(run_id=run_id))
 
 
+@router.post("/pipeline/runs/{run_id}/stop")
+def stop_pipeline_run(
+    run_id: str,
+    pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
+) -> dict[str, object]:
+    return _handle(lambda: pipeline.stop_run(run_id=run_id))
+
+
 @router.post("/pipeline/runs/{run_id}/resume")
 def resume_pipeline_run(
     run_id: str,

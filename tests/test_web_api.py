@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from threading import Event
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1000,6 +1002,115 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(monthly.status_code, 200)
                 self.assertEqual(monthly.json()["period_from"], "2025-03")
                 self.assertEqual(monthly.json()["period_to"], "2025-03")
+
+    def test_smart_pipeline_pause_and_stop_interrupt_background_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+
+            with TestClient(app) as client:
+                categories = client.get("/api/workflow/categories").json()["categories"]
+                category_ids = [row["category_id"] for row in categories if row["category_name"] == "Лимонная кислота"][:2]
+
+                def create_ready_plan(project_name: str) -> tuple[str, list[dict[str, object]]]:
+                    plan_response = client.post(
+                        "/api/workflow/pipeline/plans",
+                        json={
+                            "project_name": project_name,
+                            "run_type": "historical_backfill",
+                            "category_ids": category_ids,
+                            "start_year": 2025,
+                            "start_month": 1,
+                            "end_year": 2025,
+                            "end_month": 1,
+                            "settings": {
+                                "overwrite_raw": False,
+                                "overwrite_processed": False,
+                                "overwrite_db": False,
+                                "max_parallel_downloads": 1,
+                                "retry_count": 0,
+                                "timeout_seconds": 300,
+                                "pause_between_requests": 0,
+                                "max_weight_kg": 40,
+                            },
+                        },
+                    )
+                    self.assertEqual(plan_response.status_code, 200)
+                    run_id = plan_response.json()["id"]
+                    tasks = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"]
+                    for index, task in enumerate(tasks):
+                        write_semicolon_csv(pd.DataFrame([{"SKU": f"готовый {project_name} {index}"}]), Path(str(task["classified_file_path"])))
+                    return run_id, tasks
+
+                pause_run_id, pause_tasks = create_ready_plan("pause-unit")
+                service = app.state.smart_pipeline_service
+                original_classify = service._classify_task
+                pause_started = Event()
+                pause_release = Event()
+
+                def classify_and_wait_for_pause(task_id: str, *, settings: dict[str, object], force_reclassify: bool = False) -> None:
+                    original_classify(task_id, settings=settings, force_reclassify=force_reclassify)
+                    if task_id == pause_tasks[0]["id"]:
+                        pause_started.set()
+                        self.assertTrue(pause_release.wait(2.0))
+
+                with patch.object(service, "_classify_task", side_effect=classify_and_wait_for_pause):
+                    started = client.post(f"/api/workflow/pipeline/runs/{pause_run_id}/rebuild-cube", json={"wait": False})
+                    self.assertEqual(started.status_code, 200)
+                    self.assertTrue(pause_started.wait(2.0))
+                    paused_request = client.post(f"/api/workflow/pipeline/runs/{pause_run_id}/pause")
+                    self.assertEqual(paused_request.status_code, 200)
+                    self.assertEqual(paused_request.json()["status"], "pausing")
+                    pause_release.set()
+
+                    paused_payload = {}
+                    for _ in range(40):
+                        paused_payload = client.get(f"/api/workflow/pipeline/runs/{pause_run_id}").json()
+                        if paused_payload["status"] == "paused":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(paused_payload["status"], "paused")
+
+                paused_tasks = client.get(f"/api/workflow/pipeline/runs/{pause_run_id}/tasks").json()["tasks"]
+                self.assertEqual(paused_tasks[0]["status"], "classified")
+                self.assertEqual(paused_tasks[0]["save_status"], "pending")
+                self.assertEqual(paused_tasks[1]["status"], "pending")
+
+                stop_run_id, stop_tasks = create_ready_plan("stop-unit")
+                stop_started = Event()
+                stop_release = Event()
+
+                def classify_and_wait_for_stop(task_id: str, *, settings: dict[str, object], force_reclassify: bool = False) -> None:
+                    original_classify(task_id, settings=settings, force_reclassify=force_reclassify)
+                    if task_id == stop_tasks[0]["id"]:
+                        stop_started.set()
+                        self.assertTrue(stop_release.wait(2.0))
+
+                with patch.object(service, "_classify_task", side_effect=classify_and_wait_for_stop):
+                    started = client.post(f"/api/workflow/pipeline/runs/{stop_run_id}/rebuild-cube", json={"wait": False})
+                    self.assertEqual(started.status_code, 200)
+                    self.assertTrue(stop_started.wait(2.0))
+                    stopped_request = client.post(f"/api/workflow/pipeline/runs/{stop_run_id}/stop")
+                    self.assertEqual(stopped_request.status_code, 200)
+                    self.assertEqual(stopped_request.json()["status"], "stopping")
+                    self.assertTrue(app.state.repository.is_pipeline_stop_requested(stop_run_id))
+                    stop_release.set()
+
+                    stopped_payload = {}
+                    for _ in range(40):
+                        stopped_payload = client.get(f"/api/workflow/pipeline/runs/{stop_run_id}").json()
+                        if stopped_payload["status"] == "stopped":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(stopped_payload["status"], "stopped")
+                    self.assertEqual(stopped_payload["current_step"], "Остановлено")
+
+                stopped_tasks = client.get(f"/api/workflow/pipeline/runs/{stop_run_id}/tasks").json()["tasks"]
+                self.assertEqual(stopped_tasks[0]["status"], "classified")
+                self.assertEqual(stopped_tasks[0]["save_status"], "pending")
+                self.assertEqual(stopped_tasks[1]["status"], "pending")
 
     def test_smart_pipeline_deletes_cube_file_and_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

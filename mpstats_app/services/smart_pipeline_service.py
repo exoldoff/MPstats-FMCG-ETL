@@ -324,7 +324,30 @@ class SmartPipelineService:
         force_db_overwrite: bool = False,
         wait: bool = False,
     ) -> dict[str, Any]:
-        self.repository.clear_pipeline_pause(run_id)
+        with self._lock:
+            if self._is_thread_active(run_id):
+                return self.get_run(run_id)
+            self.repository.clear_pipeline_control(run_id)
+            if not wait:
+                self.repository.update_pipeline_run(
+                    run_id,
+                    {"status": "running", "current_step": "Старт", "started_at": datetime.now(), "finished_at": None},
+                )
+                thread = Thread(
+                    target=self._run,
+                    kwargs={
+                        "run_id": run_id,
+                        "task_filter": task_filter,
+                        "task_ids": task_ids,
+                        "rebuild_only": rebuild_only,
+                        "force_reclassify": force_reclassify,
+                        "force_db_overwrite": force_db_overwrite,
+                    },
+                    daemon=True,
+                )
+                self._threads[run_id] = thread
+                thread.start()
+                return self.get_run(run_id)
         if wait:
             self._run(
                 run_id=run_id,
@@ -335,31 +358,31 @@ class SmartPipelineService:
                 force_db_overwrite=force_db_overwrite,
             )
             return self.get_run(run_id)
-        with self._lock:
-            if self._is_thread_active(run_id):
-                return self.get_run(run_id)
-            self.repository.update_pipeline_run(
-                run_id,
-                {"status": "running", "current_step": "Старт", "started_at": datetime.now(), "finished_at": None},
-            )
-            thread = Thread(
-                target=self._run,
-                kwargs={
-                    "run_id": run_id,
-                    "task_filter": task_filter,
-                    "task_ids": task_ids,
-                    "rebuild_only": rebuild_only,
-                    "force_reclassify": force_reclassify,
-                    "force_db_overwrite": force_db_overwrite,
-                },
-                daemon=True,
-            )
-            self._threads[run_id] = thread
-            thread.start()
         return self.get_run(run_id)
 
     def pause_run(self, *, run_id: str) -> dict[str, Any]:
+        run = self.repository.get_pipeline_run(run_id)
+        if not run:
+            raise KeyError(f"Запуск не найден: {run_id}")
+        if str(run.get("status") or "") == "paused":
+            return self.get_run(run_id)
         self.repository.request_pipeline_pause(run_id)
+        if not self._is_thread_active(run_id):
+            self.repository.update_pipeline_run(run_id, {"status": "paused", "current_step": "Пауза"})
+        return self.get_run(run_id)
+
+    def stop_run(self, *, run_id: str) -> dict[str, Any]:
+        run = self.repository.get_pipeline_run(run_id)
+        if not run:
+            raise KeyError(f"Запуск не найден: {run_id}")
+        if str(run.get("status") or "") == "stopped":
+            return self.get_run(run_id)
+        self.repository.request_pipeline_stop(run_id)
+        if not self._is_thread_active(run_id):
+            self.repository.update_pipeline_run(
+                run_id,
+                {"status": "stopped", "current_step": "Остановлено", "finished_at": datetime.now()},
+            )
         return self.get_run(run_id)
 
     def resume_run(self, *, run_id: str, wait: bool = False) -> dict[str, Any]:
@@ -418,18 +441,24 @@ class SmartPipelineService:
             tasks = [task for task in tasks if str(task["id"]) in wanted]
         try:
             for task in tasks:
+                self._check_control(run_id)
                 if str(task["status"]) in FINAL_STATUSES and not settings.get("overwrite_db"):
                     continue
-                if self.repository.is_pipeline_pause_requested(run_id):
-                    self.repository.update_pipeline_run(run_id, {"status": "paused", "current_step": "Пауза"})
-                    return
                 self._execute_task(
                     task,
                     settings=settings,
                     rebuild_only=rebuild_only,
                     force_reclassify=force_reclassify,
                 )
+                self._check_control(run_id)
             self._finish_run(run_id)
+        except _PipelinePaused:
+            self.repository.update_pipeline_run(run_id, {"status": "paused", "current_step": "Пауза"})
+        except _PipelineStopped:
+            self.repository.update_pipeline_run(
+                run_id,
+                {"status": "stopped", "current_step": "Остановлено", "finished_at": datetime.now()},
+            )
         except Exception as exc:
             self.repository.update_pipeline_run(
                 run_id,
@@ -463,24 +492,25 @@ class SmartPipelineService:
     ) -> None:
         task_id = str(task["id"])
         try:
+            self._check_control(str(task["run_id"]))
             fresh = self.repository.get_download_task(task_id) or task
             classified_exists = Path(str(fresh["classified_file_path"])).exists()
             processed_exists = Path(str(fresh["processed_file_path"])).exists()
             if not force_reclassify and not settings.get("overwrite_processed") and (classified_exists or processed_exists):
                 self._classify_task(task_id, settings=settings, force_reclassify=force_reclassify)
-                self._check_pause(str(task["run_id"]))
+                self._check_control(str(task["run_id"]))
                 self._save_task(task_id, settings=settings)
                 return
             if not rebuild_only:
                 self._download_task(task, settings=settings)
-                self._check_pause(str(task["run_id"]))
+                self._check_control(str(task["run_id"]))
                 self._process_task(task_id, settings=settings)
-                self._check_pause(str(task["run_id"]))
+                self._check_control(str(task["run_id"]))
             self._classify_task(task_id, settings=settings, force_reclassify=force_reclassify)
-            self._check_pause(str(task["run_id"]))
+            self._check_control(str(task["run_id"]))
             self._save_task(task_id, settings=settings)
-        except _PipelinePaused:
-            self.repository.update_pipeline_run(str(task["run_id"]), {"status": "paused", "current_step": "Пауза"})
+        except _PipelineInterrupted:
+            raise
         except Exception as exc:
             self.repository.update_download_task(
                 task_id,
@@ -489,6 +519,8 @@ class SmartPipelineService:
 
     def _download_task(self, task: dict[str, Any], *, settings: dict[str, Any]) -> None:
         task_id = str(task["id"])
+        run_id = str(task["run_id"])
+        self._check_control(run_id)
         raw_path = Path(str(task["raw_file_path"]))
         if raw_path.exists() and not settings.get("overwrite_raw"):
             self.repository.update_download_task(task_id, {"status": "downloaded", "download_status": "downloaded", "error_message": None})
@@ -512,6 +544,7 @@ class SmartPipelineService:
         session = build_session(cookie)
         last_error: Exception | None = None
         for attempt in range(int(settings.get("retry_count") or 0) + 1):
+            self._check_control(run_id)
             try:
                 downloaded = export_one_month(
                     session,
@@ -529,7 +562,7 @@ class SmartPipelineService:
                 last_error = exc
                 if attempt >= int(settings.get("retry_count") or 0):
                     raise
-                time.sleep(float(settings.get("pause_between_requests") or 0.0))
+                self._sleep_with_control(run_id, float(settings.get("pause_between_requests") or 0.0))
         if last_error and not raw_path.exists():
             raise last_error
         if not raw_path.exists() or raw_path.stat().st_size == 0:
@@ -538,12 +571,13 @@ class SmartPipelineService:
         self.repository.update_download_task(task_id, {"status": "downloaded", "download_status": "downloaded", "raw_file_path": str(raw_path)})
         pause = float(settings.get("pause_between_requests") or 0.0)
         if pause:
-            time.sleep(pause)
+            self._sleep_with_control(run_id, pause)
 
     def _process_task(self, task_id: str, *, settings: dict[str, Any]) -> None:
         task = self.repository.get_download_task(task_id)
         if not task:
             raise KeyError(task_id)
+        self._check_control(str(task["run_id"]))
         processed_path = Path(str(task["processed_file_path"]))
         if processed_path.exists() and not settings.get("overwrite_processed"):
             rows = len(read_semicolon_csv(processed_path, low_memory=False))
@@ -581,6 +615,7 @@ class SmartPipelineService:
         task = self.repository.get_download_task(task_id)
         if not task:
             raise KeyError(task_id)
+        self._check_control(str(task["run_id"]))
         classified_path = Path(str(task["classified_file_path"]))
         if classified_path.exists() and not force_reclassify and not settings.get("overwrite_processed"):
             rows = len(read_semicolon_csv(classified_path, low_memory=False))
@@ -613,6 +648,7 @@ class SmartPipelineService:
         task = self.repository.get_download_task(task_id)
         if not task:
             raise KeyError(task_id)
+        self._check_control(str(task["run_id"]))
         existing = self.repository.get_cube_entry(
             project_name=str(task["project_name"]),
             year=int(task["year"]),
@@ -848,9 +884,20 @@ class SmartPipelineService:
             export_task["filterModel"] = json.loads(str(category[0]["filter_json"]))
         return export_task
 
-    def _check_pause(self, run_id: str) -> None:
+    def _check_control(self, run_id: str) -> None:
+        if self.repository.is_pipeline_stop_requested(run_id):
+            raise _PipelineStopped()
         if self.repository.is_pipeline_pause_requested(run_id):
             raise _PipelinePaused()
+
+    def _sleep_with_control(self, run_id: str, seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, seconds)
+        while True:
+            self._check_control(run_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.2, remaining))
 
     def _is_thread_active(self, run_id: str) -> bool:
         thread = self._threads.get(run_id)
@@ -869,5 +916,13 @@ class SmartPipelineService:
         return parsed if isinstance(parsed, dict) else {}
 
 
-class _PipelinePaused(Exception):
+class _PipelineInterrupted(Exception):
+    pass
+
+
+class _PipelinePaused(_PipelineInterrupted):
+    pass
+
+
+class _PipelineStopped(_PipelineInterrupted):
     pass

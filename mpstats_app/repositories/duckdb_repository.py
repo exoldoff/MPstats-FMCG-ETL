@@ -562,6 +562,7 @@ class DuckDbAppRepository:
             "failed_tasks",
             "current_step",
             "pause_requested",
+            "stop_requested",
             "started_at",
             "finished_at",
         }
@@ -579,12 +580,22 @@ class DuckDbAppRepository:
     def request_pipeline_pause(self, run_id: str) -> dict[str, Any] | None:
         return self.update_pipeline_run(run_id, {"pause_requested": True, "status": "pausing"})
 
+    def request_pipeline_stop(self, run_id: str) -> dict[str, Any] | None:
+        return self.update_pipeline_run(run_id, {"stop_requested": True, "pause_requested": False, "status": "stopping"})
+
     def clear_pipeline_pause(self, run_id: str) -> dict[str, Any] | None:
         return self.update_pipeline_run(run_id, {"pause_requested": False})
+
+    def clear_pipeline_control(self, run_id: str) -> dict[str, Any] | None:
+        return self.update_pipeline_run(run_id, {"pause_requested": False, "stop_requested": False})
 
     def is_pipeline_pause_requested(self, run_id: str) -> bool:
         row = self._fetch_one("SELECT pause_requested FROM pipeline_runs WHERE id = ?", [run_id])
         return bool(row and row.get("pause_requested"))
+
+    def is_pipeline_stop_requested(self, run_id: str) -> bool:
+        row = self._fetch_one("SELECT stop_requested FROM pipeline_runs WHERE id = ?", [run_id])
+        return bool(row and row.get("stop_requested"))
 
     def refresh_pipeline_run_counts(self, run_id: str) -> dict[str, Any] | None:
         row = self._fetch_one(
