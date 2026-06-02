@@ -3,6 +3,8 @@ import {
   Archive,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   CircleHelp,
   Copy,
   Database,
@@ -12,6 +14,8 @@ import {
   Github,
   History,
   ListChecks,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pause,
   Play,
   Plus,
@@ -449,6 +453,8 @@ export function App() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [instructionOpen, setInstructionOpen] = useState(false);
+  const [leftRailCollapsed, setLeftRailCollapsed] = useState(false);
+  const [pipelineSettingsOpen, setPipelineSettingsOpen] = useState(false);
   const exportDefaultOutputDirRef = useRef("");
   const previousRunStatusRef = useRef<string | null>(null);
 
@@ -1312,6 +1318,26 @@ export function App() {
     return api.saveWorkflowSettings(workflowSettingsPayload());
   }
 
+  const runIsActive = isActiveRunStatus(run?.status);
+  const runIsPaused = run?.status === "paused";
+  const runHasTasks = Boolean(run?.id && (run.total_tasks ?? 0) > 0);
+  const runHasRemainingWork = Boolean(run?.id && ((run.remaining_tasks ?? 0) > 0 || (run.failed_tasks ?? 0) > 0));
+  const canCreatePlan = !busy && !runIsActive && (mode === "monthly_sync" || (selected.size > 0 && monthsCount > 0));
+  const canStartRun = !busy && !runIsActive && runHasTasks && runHasRemainingWork;
+  const canPauseRun = !busy && Boolean(run?.id) && runIsActive;
+  const canResumeRun = !busy && Boolean(run?.id) && runIsPaused;
+  const canRetryErrors = !busy && Boolean(run?.id) && !runIsActive && (run?.failed_tasks ?? 0) > 0;
+  const canRebuildCube = !busy && runHasTasks && !runIsActive;
+  const canSyncNewMonth = !busy && !runIsActive;
+  const createPlanDisabledTitle =
+    mode === "historical_backfill" && !selected.size
+      ? "Сначала выбери категории."
+      : mode === "historical_backfill" && monthsCount <= 0
+        ? "Проверь диапазон месяцев."
+        : runIsActive
+          ? "Дождись завершения текущего запуска или поставь его на паузу."
+          : undefined;
+
   return (
     <div className="workflow-shell">
       <header className="app-header">
@@ -1350,8 +1376,27 @@ export function App() {
       {error ? <Notice tone="error" text={error} onClose={() => setError(null)} /> : null}
       {message ? <Notice tone="success" text={message} onClose={() => setMessage(null)} /> : null}
 
-      <main className="workflow-grid">
-        <aside className="left-rail">
+      <main className={`workflow-grid ${leftRailCollapsed ? "left-collapsed" : ""}`}>
+        <aside className={`left-rail ${leftRailCollapsed ? "collapsed" : ""}`}>
+          <section className="panel rail-control-panel">
+            <button
+              className="icon-button"
+              title={leftRailCollapsed ? "Развернуть настройки" : "Свернуть настройки"}
+              aria-label={leftRailCollapsed ? "Развернуть настройки" : "Свернуть настройки"}
+              onClick={() => setLeftRailCollapsed((value) => !value)}
+            >
+              {leftRailCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+            </button>
+            {!leftRailCollapsed ? (
+              <div>
+                <strong>Настройки</strong>
+                <small>Проект, доступ и pipeline</small>
+              </div>
+            ) : null}
+          </section>
+
+          {!leftRailCollapsed ? (
+          <>
           <section className="panel">
             <SectionTitle icon={<Settings />} title="Проект и доступ" hint="Project name разделяет файлы, manifest и записи БД. Cookie нужен только для скачивания из MPStats." />
             <div className="form-grid">
@@ -1376,31 +1421,6 @@ export function App() {
                 <FieldLabel text="MPStats cookie" hint="Cookie текущей авторизованной сессии MPStats. Нужен только для скачивания; если устарел, задачи будут падать с ошибкой доступа." />
                 <textarea className="cookie-input" value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder="Вставь cookie из MPStats" />
               </label>
-              {mode === "historical_backfill" ? (
-                <div className="period-grid">
-                  <label>
-                    <FieldLabel text="С года" hint="Первый год периода исторической загрузки. Используется при создании плана задач." />
-                    <input type="number" value={startYear} onChange={(event) => setStartYear(Number(event.target.value))} />
-                  </label>
-                  <label>
-                    <FieldLabel text="С месяца" hint="Первый месяц периода, число от 1 до 12. Например, 1 — январь." />
-                    <input type="number" min={1} max={12} value={startMonth} onChange={(event) => setStartMonth(Number(event.target.value))} />
-                  </label>
-                  <label>
-                    <FieldLabel text="По год" hint="Последний год периода исторической загрузки. Конечный месяц включается в план." />
-                    <input type="number" value={endYear} onChange={(event) => setEndYear(Number(event.target.value))} />
-                  </label>
-                  <label>
-                    <FieldLabel text="По месяц" hint="Последний месяц периода, число от 1 до 12. Период считается включительно." />
-                    <input type="number" min={1} max={12} value={endMonth} onChange={(event) => setEndMonth(Number(event.target.value))} />
-                  </label>
-                </div>
-              ) : (
-                <div className="sync-note">
-                  <strong>Новый месяц определяется автоматически.</strong>
-                  <span>Берём последний сохранённый месяц и создаём задачи на следующий.</span>
-                </div>
-              )}
             </div>
             <button
               className="primary-button"
@@ -1418,32 +1438,47 @@ export function App() {
           </section>
 
           <section className="panel">
-            <SectionTitle icon={<ListChecks />} title="Настройки pipeline" hint="Эти параметры управляют повторными запусками: что можно пересобирать, сколько ждать MPStats и какие файлы считать готовыми." />
-            <div className="settings-grid">
-              <Toggle label="Перескачивать raw" hint="Если включено, приложение заново скачает исходные CSV из MPStats даже когда raw-файл уже есть. Полезно, если отчёт в MPStats изменился." checked={pipelineSettings.overwrite_raw} onChange={(value) => setPipelineValue("overwrite_raw", value)} />
-              <Toggle label="Пересобирать processed" hint="Если включено, приложение заново обработает raw-файлы: приведёт колонки, пересчитает вес, объём и классификацию. Скачивание при этом не обязательно повторяется." checked={pipelineSettings.overwrite_processed} onChange={(value) => setPipelineValue("overwrite_processed", value)} />
-              <Toggle label="Перезаписывать БД" hint="Если включено, сохранённый срез для той же связки проект + месяц + маркетплейс + категория будет заменён. Используй осторожно, когда нужно обновить уже загруженные данные." checked={pipelineSettings.overwrite_db} onChange={(value) => setPipelineValue("overwrite_db", value)} />
-              <label>
-                <FieldLabel text="Количество повторов" hint="Сколько раз повторить задачу после временной ошибки скачивания или подготовки отчёта MPStats. 0 — не повторять." />
-                <input type="number" min={0} value={pipelineSettings.retry_count} onChange={(event) => setPipelineValue("retry_count", Number(event.target.value))} />
-              </label>
-              <label>
-                <FieldLabel text="Таймаут, сек" hint="Сколько секунд ждать, пока MPStats подготовит отчёт или ответит на запрос. Если отчёты большие, лучше увеличить." />
-                <input type="number" min={30} value={pipelineSettings.timeout_seconds} onChange={(event) => setPipelineValue("timeout_seconds", Number(event.target.value))} />
-              </label>
-              <label>
-                <FieldLabel text="Пауза между запросами" hint="Пауза между обращениями к MPStats в секундах. Помогает не упираться в ограничения сервиса и снижает риск временных ошибок." />
-                <input type="number" min={0} value={pipelineSettings.pause_between_requests} onChange={(event) => setPipelineValue("pause_between_requests", Number(event.target.value))} />
-              </label>
-              <label>
-                <FieldLabel text="Параллельные скачивания" hint="Сколько задач скачивания можно запускать одновременно. Безопасный режим — 1; увеличивай только если MPStats стабильно отвечает." />
-                <input type="number" min={1} max={8} value={pipelineSettings.max_parallel_downloads} onChange={(event) => setPipelineValue("max_parallel_downloads", Number(event.target.value))} />
-              </label>
-              <label>
-                <FieldLabel text="Максимальный вес, кг" hint="Порог проверки парсинга веса из названия товара. Значения выше порога считаются подозрительными и помечаются как аномалии." />
-                <input type="number" min={1} value={pipelineSettings.max_weight_kg} onChange={(event) => setPipelineValue("max_weight_kg", Number(event.target.value))} />
-              </label>
+            <div className="collapsible-title">
+              <div><ListChecks size={18} /><h2>Настройки pipeline</h2><Hint text="Эти параметры управляют повторными запусками: что можно пересобирать, сколько ждать MPStats и какие файлы считать готовыми." /></div>
+              <button className="tiny-button" type="button" onClick={() => setPipelineSettingsOpen((value) => !value)}>
+                {pipelineSettingsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                {pipelineSettingsOpen ? "Скрыть" : "Открыть"}
+              </button>
             </div>
+            {pipelineSettingsOpen ? (
+              <div className="settings-grid">
+                <Toggle label="Перескачивать raw" hint="Если включено, приложение заново скачает исходные CSV из MPStats даже когда raw-файл уже есть. Полезно, если отчёт в MPStats изменился." checked={pipelineSettings.overwrite_raw} onChange={(value) => setPipelineValue("overwrite_raw", value)} />
+                <Toggle label="Пересобирать processed" hint="Если включено, приложение заново обработает raw-файлы: приведёт колонки, пересчитает вес, объём и классификацию. Скачивание при этом не обязательно повторяется." checked={pipelineSettings.overwrite_processed} onChange={(value) => setPipelineValue("overwrite_processed", value)} />
+                <Toggle label="Перезаписывать БД" hint="Если включено, сохранённый срез для той же связки проект + месяц + маркетплейс + категория будет заменён. Используй осторожно, когда нужно обновить уже загруженные данные." checked={pipelineSettings.overwrite_db} onChange={(value) => setPipelineValue("overwrite_db", value)} />
+                <label>
+                  <FieldLabel text="Количество повторов" hint="Сколько раз повторить задачу после временной ошибки скачивания или подготовки отчёта MPStats. 0 — не повторять." />
+                  <input type="number" min={0} value={pipelineSettings.retry_count} onChange={(event) => setPipelineValue("retry_count", Number(event.target.value))} />
+                </label>
+                <label>
+                  <FieldLabel text="Таймаут, сек" hint="Сколько секунд ждать, пока MPStats подготовит отчёт или ответит на запрос. Если отчёты большие, лучше увеличить." />
+                  <input type="number" min={30} value={pipelineSettings.timeout_seconds} onChange={(event) => setPipelineValue("timeout_seconds", Number(event.target.value))} />
+                </label>
+                <label>
+                  <FieldLabel text="Пауза между запросами" hint="Пауза между обращениями к MPStats в секундах. Помогает не упираться в ограничения сервиса и снижает риск временных ошибок." />
+                  <input type="number" min={0} value={pipelineSettings.pause_between_requests} onChange={(event) => setPipelineValue("pause_between_requests", Number(event.target.value))} />
+                </label>
+                <label>
+                  <FieldLabel text="Параллельные скачивания" hint="Сколько задач скачивания можно запускать одновременно. Безопасный режим — 1; увеличивай только если MPStats стабильно отвечает." />
+                  <input type="number" min={1} max={8} value={pipelineSettings.max_parallel_downloads} onChange={(event) => setPipelineValue("max_parallel_downloads", Number(event.target.value))} />
+                </label>
+                <label>
+                  <FieldLabel text="Максимальный вес, кг" hint="Порог проверки парсинга веса из названия товара. Значения выше порога считаются подозрительными и помечаются как аномалии." />
+                  <input type="number" min={1} value={pipelineSettings.max_weight_kg} onChange={(event) => setPipelineValue("max_weight_kg", Number(event.target.value))} />
+                </label>
+              </div>
+            ) : (
+              <div className="settings-summary">
+                <span>{pipelineSettings.overwrite_raw ? "raw: заново" : "raw: reuse"}</span>
+                <span>{pipelineSettings.overwrite_processed ? "processed: заново" : "processed: reuse"}</span>
+                <span>{pipelineSettings.overwrite_db ? "БД: overwrite" : "БД: без дублей"}</span>
+                <span>{pipelineSettings.retry_count} повтор(а), {pipelineSettings.timeout_seconds} сек</span>
+              </div>
+            )}
           </section>
 
           <section className="panel">
@@ -1463,6 +1498,8 @@ export function App() {
 	              </button>
 	            </div>
 	          </section>
+          </>
+          ) : null}
         </aside>
 
         <section className="center-stage">
@@ -1562,6 +1599,48 @@ export function App() {
                 meta={smartPlan ? `${smartPlan.summary.total} задач` : run ? `${run.total_tasks} задач` : "план не создан"}
                 hint="Сверяет желаемые задачи с локальными файлами и БД: готово, нет файлов, устарело, ошибка или неполно."
               />
+              <div className="plan-setup">
+                <div className="plan-setup-head">
+                  <div>
+                    <strong>{mode === "monthly_sync" ? "Новый месяц" : "Период плана"}</strong>
+                    <small>{mode === "monthly_sync" ? "следующий месяц определяется по registry" : `${selected.size} категорий, ${monthsCount} месяцев`}</small>
+                  </div>
+                  <button
+                    className="primary-inline-button"
+                    disabled={!canCreatePlan}
+                    title={createPlanDisabledTitle}
+                    onClick={() => void runAction("Создание плана", createPlan)}
+                  >
+                    <ListChecks size={17} />
+                    Создать план
+                  </button>
+                </div>
+                {mode === "historical_backfill" ? (
+                  <div className="period-grid compact-period-grid">
+                    <label>
+                      <FieldLabel text="С года" hint="Первый год периода исторической загрузки. Используется при создании плана задач." />
+                      <input type="number" value={startYear} onChange={(event) => setStartYear(Number(event.target.value))} />
+                    </label>
+                    <label>
+                      <FieldLabel text="С месяца" hint="Первый месяц периода, число от 1 до 12. Например, 1 — январь." />
+                      <input type="number" min={1} max={12} value={startMonth} onChange={(event) => setStartMonth(Number(event.target.value))} />
+                    </label>
+                    <label>
+                      <FieldLabel text="По год" hint="Последний год периода исторической загрузки. Конечный месяц включается в план." />
+                      <input type="number" value={endYear} onChange={(event) => setEndYear(Number(event.target.value))} />
+                    </label>
+                    <label>
+                      <FieldLabel text="По месяц" hint="Последний месяц периода, число от 1 до 12. Период считается включительно." />
+                      <input type="number" min={1} max={12} value={endMonth} onChange={(event) => setEndMonth(Number(event.target.value))} />
+                    </label>
+                  </div>
+                ) : (
+                  <div className="sync-note compact-sync-note">
+                    <strong>Месяц выбирать не нужно.</strong>
+                    <span>Берём последний сохранённый месяц и создаём задачи на следующий.</span>
+                  </div>
+                )}
+              </div>
               {smartPlan ? <SmartPlanOverview plan={smartPlan} /> : null}
               <CubeMatrixTable items={cube} />
               <div className="toolbar wrap">
@@ -1779,35 +1858,35 @@ export function App() {
             <SectionTitle icon={<Play />} title="Текущий запуск" />
             <RunSummary run={run} selectedCount={selectedCategories.length} monthsCount={monthsCount} mode={mode} />
             <div className="action-stack">
-              <button className="action-button" disabled={Boolean(busy) || (mode === "historical_backfill" && !selected.size)} onClick={() => void runAction("Создание плана", createPlan)}>
+              <button className="action-button" disabled={!canCreatePlan} title={createPlanDisabledTitle} onClick={() => void runAction("Создание плана", createPlan)}>
                 <ListChecks size={20} />
                 <span><strong>Создать план</strong><small>Проверить manifest и файлы</small></span>
               </button>
-              <button className="action-button" disabled={Boolean(busy) || !run?.id} onClick={() => run?.id && void runAction("Запуск", () => api.startRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+              <button className="action-button" disabled={!canStartRun} onClick={() => run?.id && void runAction("Запуск", () => api.startRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
                 <Play size={20} />
                 <span><strong>Запустить</strong><small>Ожидающие задачи и ошибки</small></span>
               </button>
-              <button className="action-button" disabled={Boolean(busy) || !run?.id} onClick={() => run?.id && void runAction("Пауза", () => api.pauseRun(run.id), setRun)}>
+              <button className="action-button" disabled={!canPauseRun} onClick={() => run?.id && void runAction("Пауза", () => api.pauseRun(run.id), setRun)}>
                 <Pause size={20} />
                 <span><strong>Пауза</strong><small>Остановится между стадиями</small></span>
               </button>
-              <button className="action-button" disabled={Boolean(busy) || !run?.id} onClick={() => run?.id && void runAction("Продолжение", () => api.resumeRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+              <button className="action-button" disabled={!canResumeRun} onClick={() => run?.id && void runAction("Продолжение", () => api.resumeRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
                 <SkipForward size={20} />
                 <span><strong>Продолжить</strong><small>Незавершённый запуск</small></span>
               </button>
-              <button className="action-button" disabled={Boolean(busy) || !run?.id} onClick={() => run?.id && void runAction("Повтор ошибок", () => api.retryErrors(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+              <button className="action-button" disabled={!canRetryErrors} onClick={() => run?.id && void runAction("Повтор ошибок", () => api.retryErrors(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
                 <RotateCcw size={20} />
                 <span><strong>Повторить ошибки</strong><small>Только задачи с ошибкой</small></span>
               </button>
-              <button className="action-button" disabled={Boolean(busy) || !run?.id} onClick={() => run?.id && void runAction("Сборка куба", () => api.rebuildCube(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+              <button className="action-button" disabled={!canRebuildCube} onClick={() => run?.id && void runAction("Сборка куба", () => api.rebuildCube(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
                 <Database size={20} />
                 <span><strong>Собрать куб из готовых файлов</strong><small>Без повторного скачивания</small></span>
               </button>
-              <button className="action-button" disabled={Boolean(busy) || !run?.id} onClick={() => run?.id && void runAction("Повторная классификация куба", () => api.reclassifyCube(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+              <button className="action-button" disabled={!canRebuildCube} onClick={() => run?.id && void runAction("Повторная классификация куба", () => api.reclassifyCube(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
                 <RotateCcw size={20} />
                 <span><strong>Переклассифицировать куб</strong><small>Перезаписать classified и БД</small></span>
               </button>
-              <button className="action-button accent" disabled={Boolean(busy)} onClick={() => void runAction("Синхронизация нового месяца", syncNewMonth)}>
+              <button className="action-button accent" disabled={!canSyncNewMonth} onClick={() => void runAction("Синхронизация нового месяца", syncNewMonth)}>
                 <RefreshCcw size={20} />
                 <span><strong>Синхронизировать новый месяц</strong><small>Следующий месяц по registry</small></span>
               </button>
