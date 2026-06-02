@@ -680,6 +680,28 @@ export function App() {
     return response;
   }
 
+  async function deleteRun(runId: string) {
+    const response = await api.deleteRun(runId);
+    const runResponse = await api.listRuns(projectName);
+    setRuns(runResponse.runs);
+    if (run?.id === runId) {
+      const nextRun = runResponse.runs[0] ?? null;
+      setRun(nextRun);
+      setSmartPlan(null);
+      if (nextRun) await refreshRun(nextRun.id, "all");
+    }
+    return response;
+  }
+
+  async function deleteProjectFile(file: ProjectFile, deleteCube: boolean) {
+    return api.deleteFile(projectName || "mpstats", file.path, deleteCube);
+  }
+
+  async function deleteCubeItem(item: CubeItem) {
+    setProducts(null);
+    return api.deleteCubeEntry(item.id);
+  }
+
   async function loadDbPreview() {
     const params = new URLSearchParams();
     params.set("project_name", projectName || "mpstats");
@@ -1584,7 +1606,13 @@ export function App() {
                   </button>
                 ))}
               </div>
-              {filteredFiles.length ? <FilesTable files={filteredFiles} /> : <Empty text={files.length ? "В выбранном типе файлов пока нет." : "Файлы появятся после скачивания и обработки."} />}
+              {filteredFiles.length ? (
+                <FilesTable
+                  files={filteredFiles}
+                  busy={Boolean(busy)}
+                  onDelete={(file, deleteCube) => void runAction("Удаление файла", () => deleteProjectFile(file, deleteCube))}
+                />
+              ) : <Empty text={files.length ? "В выбранном типе файлов пока нет." : "Файлы появятся после скачивания и обработки."} />}
             </section>
           ) : null}
 
@@ -1622,7 +1650,13 @@ export function App() {
                   Найти
                 </button>
               </div>
-              {cube.length ? <CubeTable items={cube} /> : <Empty text="После сохранения задач здесь появится registry куба." />}
+              {cube.length ? (
+                <CubeTable
+                  items={cube}
+                  busy={Boolean(busy)}
+                  onDelete={(item) => void runAction("Удаление среза куба", () => deleteCubeItem(item))}
+                />
+              ) : <Empty text="После сохранения задач здесь появится registry куба." />}
               {products ? (
                 <div className="db-results">
                   <h3>{productResultTitle}: {products.total} записей</h3>
@@ -1784,10 +1818,24 @@ export function App() {
             <SectionTitle icon={<History />} title="Последние планы" />
             <div className="run-list">
               {runs.map((item) => (
-                <button key={item.id} className={`run-row ${run?.id === item.id ? "active" : ""}`} onClick={() => { setRun(item); setTab("plan"); void refreshRun(item.id); }}>
-                  <span><strong>{runTypeLabel(item.run_type)}</strong><small>{item.period_from} - {item.period_to}</small></span>
-                  <Badge value={item.status} />
-                </button>
+                <div key={item.id} className={`run-row ${run?.id === item.id ? "active" : ""}`}>
+                  <button className="run-select-button" onClick={() => { setRun(item); setTab("plan"); void refreshRun(item.id); }}>
+                    <span><strong>{runTypeLabel(item.run_type)}</strong><small>{item.period_from} - {item.period_to}</small></span>
+                    <Badge value={item.status} />
+                  </button>
+                  <button
+                    className="icon-button danger-inline"
+                    disabled={Boolean(busy) || isActiveRunStatus(item.status)}
+                    title={isActiveRunStatus(item.status) ? "Выполняющийся план нельзя удалить." : "Удалить план и его задачи."}
+                    onClick={() => {
+                      if (window.confirm(`Удалить план «${runTypeLabel(item.run_type)}» за ${item.period_from} - ${item.period_to}? Файлы и куб останутся на месте.`)) {
+                        void runAction("Удаление плана", () => deleteRun(item.id));
+                      }
+                    }}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
               ))}
               {!runs.length ? <Empty text="Планов пока нет." /> : null}
             </div>
@@ -2033,13 +2081,35 @@ function ProjectsWorkspace(props: {
   );
 }
 
-function FilesTable(props: { files: ProjectFile[] }) {
+function FilesTable(props: { files: ProjectFile[]; busy: boolean; onDelete: (file: ProjectFile, deleteCube: boolean) => void }) {
+  function confirmDelete(file: ProjectFile) {
+    const name = file.relative_path ?? file.path;
+    if (!window.confirm(`Удалить файл «${name}»?`)) return;
+    const deleteCube =
+      file.kind === "classified" &&
+      window.confirm("Если этот classified-файл уже сохранён в куб, удалить связанный срез и строки БД тоже?");
+    props.onDelete(file, deleteCube);
+  }
+
   return (
     <FilterableTable
       rows={props.files}
       rowKey={(file) => file.path}
       emptyText="Нет файлов по текущим фильтрам."
       columns={[
+        {
+          id: "actions",
+          label: "",
+          value: () => "",
+          render: (file) => (
+            <button className="icon-button danger-inline" disabled={props.busy} title="Удалить файл" onClick={() => confirmDelete(file)}>
+              <Trash2 size={16} />
+            </button>
+          ),
+          className: "row-action-col",
+          filterable: false,
+          sortable: false
+        },
         {
           id: "kind",
           label: "Тип",
@@ -3095,13 +3165,33 @@ function ClassifierRulesEditor(props: {
   );
 }
 
-function CubeTable(props: { items: CubeItem[] }) {
+function CubeTable(props: { items: CubeItem[]; busy: boolean; onDelete: (item: CubeItem) => void }) {
+  function confirmDelete(item: CubeItem) {
+    const label = `${monthLabel(item.year, item.month)} · ${item.marketplace} · ${item.category_name}`;
+    if (window.confirm(`Удалить срез куба «${label}» и строки БД? Исходные файлы останутся на диске.`)) {
+      props.onDelete(item);
+    }
+  }
+
   return (
     <FilterableTable
       rows={props.items}
       rowKey={(item) => item.id}
       emptyText="Нет срезов куба по текущим фильтрам."
       columns={[
+        {
+          id: "actions",
+          label: "",
+          value: () => "",
+          render: (item) => (
+            <button className="icon-button danger-inline" disabled={props.busy} title="Удалить срез куба" onClick={() => confirmDelete(item)}>
+              <Trash2 size={16} />
+            </button>
+          ),
+          className: "row-action-col",
+          filterable: false,
+          sortable: false
+        },
         { id: "month", label: "Месяц", value: (item) => monthLabel(item.year, item.month) },
         { id: "marketplace", label: "Marketplace", value: (item) => item.marketplace },
         { id: "category", label: "Категория", value: (item) => item.category_name },

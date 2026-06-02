@@ -998,6 +998,102 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(monthly.json()["period_from"], "2025-03")
                 self.assertEqual(monthly.json()["period_to"], "2025-03")
 
+    def test_smart_pipeline_deletes_cube_file_and_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+
+            with TestClient(app) as client:
+                categories = client.get("/api/workflow/categories").json()["categories"]
+                category_id = next(row["category_id"] for row in categories if row["category_name"] == "Лимонная кислота")
+                plan_response = client.post(
+                    "/api/workflow/pipeline/plans",
+                    json={
+                        "project_name": "unit",
+                        "run_type": "historical_backfill",
+                        "category_ids": [category_id],
+                        "start_year": 2025,
+                        "start_month": 1,
+                        "end_year": 2025,
+                        "end_month": 1,
+                        "settings": {
+                            "overwrite_raw": False,
+                            "overwrite_processed": False,
+                            "overwrite_db": False,
+                            "max_parallel_downloads": 1,
+                            "retry_count": 0,
+                            "timeout_seconds": 300,
+                            "pause_between_requests": 0,
+                            "max_weight_kg": 40,
+                        },
+                    },
+                )
+                self.assertEqual(plan_response.status_code, 200)
+                run_id = plan_response.json()["id"]
+                task = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"][0]
+                processed_path = Path(task["processed_file_path"])
+                classified_path = Path(task["classified_file_path"])
+                processed_path.parent.mkdir(parents=True, exist_ok=True)
+                source_frame = pd.DataFrame(
+                    [
+                        {
+                            "Маркетплейс": task["marketplace"],
+                            "Категория": task["category_name"],
+                            "Артикул": "sku-1",
+                            "SKU": "лимон удаление",
+                            "Бренд": "brand",
+                            "Тип": "Кислота",
+                            "Продажи, шт": 5,
+                        }
+                    ]
+                )
+                write_semicolon_csv(source_frame, processed_path)
+                write_semicolon_csv(source_frame, classified_path)
+
+                rebuilt = client.post(f"/api/workflow/pipeline/runs/{run_id}/rebuild-cube", json={"wait": True})
+                self.assertEqual(rebuilt.status_code, 200)
+                self.assertEqual(rebuilt.json()["completed_tasks"], 1)
+                cube_entry = client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"}).json()["items"][0]
+                search = client.get("/api/products", params={"project_name": "unit", "query": "удаление", "limit": 100})
+                self.assertEqual(search.json()["total"], 1)
+
+                deleted_cube = client.delete(f"/api/workflow/pipeline/cube/{cube_entry['id']}")
+                self.assertEqual(deleted_cube.status_code, 200)
+                self.assertEqual(deleted_cube.json()["deleted"]["cube_registry"], 1)
+                self.assertEqual(deleted_cube.json()["deleted"]["product_rows"], 1)
+                self.assertEqual(client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"}).json()["items"], [])
+                task_after_cube_delete = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"][0]
+                self.assertEqual(task_after_cube_delete["status"], "classified")
+                self.assertEqual(task_after_cube_delete["save_status"], "pending")
+                search_after_cube_delete = client.get("/api/products", params={"project_name": "unit", "query": "удаление", "limit": 100})
+                self.assertEqual(search_after_cube_delete.json()["total"], 0)
+
+                rebuilt_again = client.post(f"/api/workflow/pipeline/runs/{run_id}/rebuild-cube", json={"wait": True})
+                self.assertEqual(rebuilt_again.status_code, 200)
+                self.assertEqual(rebuilt_again.json()["completed_tasks"], 1)
+                deleted_file = client.delete(
+                    "/api/workflow/pipeline/files",
+                    params={"project_name": "unit", "path": str(classified_path), "delete_cube": True},
+                )
+                self.assertEqual(deleted_file.status_code, 200)
+                self.assertFalse(classified_path.exists())
+                self.assertEqual(deleted_file.json()["deleted"]["files"], 1)
+                self.assertEqual(deleted_file.json()["deleted"]["download_tasks"], 1)
+                self.assertEqual(deleted_file.json()["cube_deletions"][0]["deleted"]["cube_registry"], 1)
+                self.assertEqual(client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"}).json()["items"], [])
+                task_after_file_delete = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"][0]
+                self.assertEqual(task_after_file_delete["classify_status"], "pending")
+                self.assertEqual(task_after_file_delete["save_status"], "pending")
+
+                deleted_plan = client.delete(f"/api/workflow/pipeline/runs/{run_id}")
+                self.assertEqual(deleted_plan.status_code, 200)
+                self.assertEqual(deleted_plan.json()["deleted"]["pipeline_runs"], 1)
+                self.assertEqual(deleted_plan.json()["deleted"]["download_tasks"], 1)
+                runs = client.get("/api/workflow/pipeline/runs", params={"project_name": "unit"}).json()["runs"]
+                self.assertNotIn(run_id, {row["id"] for row in runs})
+
     def test_smart_pipeline_files_classify_kinds_and_hide_merged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

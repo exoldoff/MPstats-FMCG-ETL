@@ -82,6 +82,12 @@ export type ProjectDeleteResponse = {
   skipped_file_paths: string[];
 };
 
+export type PipelineDeleteResponse = {
+  run_id: string;
+  project_name: string;
+  deleted: Record<string, number>;
+};
+
 export type PipelineSettings = {
   overwrite_raw: boolean;
   overwrite_processed: boolean;
@@ -274,6 +280,21 @@ export type CubeItem = {
   data_actual_until?: string | null;
   saved_to_db_at: string;
   source_processed_file_path?: string | null;
+};
+
+export type CubeDeleteResponse = {
+  entry_id: string;
+  deleted: Record<string, number>;
+  entry?: CubeItem | null;
+};
+
+export type ProjectFileDeleteResponse = {
+  project_name: string;
+  path: string;
+  relative_path: string;
+  kind: string;
+  deleted: Record<string, number>;
+  cube_deletions: CubeDeleteResponse[];
 };
 
 export type ProductSearch = {
@@ -492,6 +513,8 @@ export const api = {
     request<PipelineRun>("/api/workflow/pipeline/monthly-sync", { method: "POST", body: JSON.stringify(payload) }),
   listRuns: (projectName: string) => request<{ runs: PipelineRun[] }>(`/api/workflow/pipeline/runs?project_name=${encodeURIComponent(projectName)}`),
   getRun: (runId: string) => request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}`),
+  deleteRun: (runId: string) =>
+    request<PipelineDeleteResponse>(`/api/workflow/pipeline/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
   getSmartPlan: (runId: string, status = "all") =>
     request<SmartPlan>(`/api/workflow/pipeline/runs/${runId}/smart-plan?status=${encodeURIComponent(status)}`),
   listTasks: (runId: string, taskFilter: string) =>
@@ -524,7 +547,14 @@ export const api = {
   buildExport: (payload: ExportPayload) =>
     request<ExportBuildResponse>("/api/exports/build", { method: "POST", body: JSON.stringify(payload) }),
   listFiles: (projectName: string) => request<{ root: string; files: ProjectFile[] }>(`/api/workflow/pipeline/files?project_name=${encodeURIComponent(projectName)}`),
+  deleteFile: (projectName: string, path: string, deleteCube: boolean) =>
+    request<ProjectFileDeleteResponse>(
+      `/api/workflow/pipeline/files?project_name=${encodeURIComponent(projectName)}&path=${encodeURIComponent(path)}&delete_cube=${encodeURIComponent(String(deleteCube))}`,
+      { method: "DELETE" }
+    ),
   listCube: (projectName: string) => request<{ items: CubeItem[] }>(`/api/workflow/pipeline/cube?project_name=${encodeURIComponent(projectName)}`),
+  deleteCubeEntry: (entryId: string) =>
+    request<CubeDeleteResponse>(`/api/workflow/pipeline/cube/${encodeURIComponent(entryId)}`, { method: "DELETE" }),
   listQualityProjects: () => request<{ projects: QualityProject[] }>("/api/quality/projects"),
   getQualityReport: (projectName: string) => request<QualityReport>(`/api/quality/report?project_name=${encodeURIComponent(projectName)}`),
   getRules: () => request<{ path: string; content: string }>("/api/rules"),

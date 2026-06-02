@@ -222,6 +222,14 @@ def get_pipeline_run(
     return _handle(lambda: pipeline.get_run(run_id))
 
 
+@router.delete("/pipeline/runs/{run_id}")
+def delete_pipeline_run(
+    run_id: str,
+    pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
+) -> dict[str, object]:
+    return _handle(lambda: pipeline.delete_run(run_id=run_id))
+
+
 @router.get("/pipeline/runs/{run_id}/tasks")
 def list_pipeline_tasks(
     run_id: str,
@@ -326,9 +334,27 @@ def list_pipeline_files(
     return _handle(lambda: pipeline.list_files(project_name=project_name))
 
 
+@router.delete("/pipeline/files")
+def delete_pipeline_file(
+    project_name: str,
+    path: str,
+    delete_cube: bool = False,
+    pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
+) -> dict[str, object]:
+    return _handle(lambda: pipeline.delete_file(project_name=project_name, path=path, delete_cube=delete_cube))
+
+
 @router.get("/pipeline/cube")
 def list_pipeline_cube(
     project_name: str,
     pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
 ) -> dict[str, object]:
     return _handle(lambda: pipeline.list_cube(project_name=project_name))
+
+
+@router.delete("/pipeline/cube/{entry_id}")
+def delete_pipeline_cube_entry(
+    entry_id: str,
+    pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
+) -> dict[str, object]:
+    return _handle(lambda: pipeline.delete_cube_entry(entry_id=entry_id))

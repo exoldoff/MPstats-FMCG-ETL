@@ -273,6 +273,46 @@ class SmartPipelineService:
     def list_cube(self, *, project_name: str) -> dict[str, Any]:
         return {"items": self.repository.list_cube_registry(project_name=project_name)}
 
+    def delete_run(self, *, run_id: str) -> dict[str, Any]:
+        run = self.repository.get_pipeline_run(run_id)
+        if not run:
+            raise KeyError(f"План не найден: {run_id}")
+        if self._is_thread_active(run_id) or str(run.get("status") or "") in {"running", "pausing"}:
+            raise ValueError("Нельзя удалить план, пока он выполняется. Сначала поставь его на паузу или дождись завершения.")
+        deleted = self.repository.delete_pipeline_run(run_id)
+        return {"run_id": run_id, "project_name": run["project_name"], "deleted": deleted}
+
+    def delete_file(self, *, project_name: str, path: str, delete_cube: bool = False) -> dict[str, Any]:
+        target, relative_path, kind = self._resolve_project_file(project_name=project_name, path=path)
+        cube_entries = self.repository.list_cube_registry_by_source_file(
+            project_name=project_name,
+            source_file_path=str(target),
+        )
+        cube_deletions: list[dict[str, Any]] = []
+        if delete_cube:
+            for entry in cube_entries:
+                cube_deletions.append(self.repository.delete_cube_entry(entry_id=str(entry["id"]), table_name=self.settings.products_table))
+
+        target.unlink()
+        if kind == "classified" and cube_entries and not delete_cube:
+            task_updates = {"download_tasks": 0}
+        else:
+            task_updates = self.repository.mark_project_file_deleted(project_name=project_name, file_path=str(target), file_kind=kind)
+        return {
+            "project_name": project_name,
+            "path": str(target),
+            "relative_path": str(relative_path),
+            "kind": kind,
+            "deleted": {"files": 1, **task_updates},
+            "cube_deletions": cube_deletions,
+        }
+
+    def delete_cube_entry(self, *, entry_id: str) -> dict[str, Any]:
+        entry = self.repository.get_cube_entry_by_id(entry_id)
+        if not entry:
+            raise KeyError(f"Срез куба не найден: {entry_id}")
+        return self.repository.delete_cube_entry(entry_id=entry_id, table_name=self.settings.products_table)
+
     def start_run(
         self,
         *,
@@ -779,6 +819,21 @@ class SmartPipelineService:
 
     def _project_data_root(self, project_name: str) -> Path:
         return self.settings.project_root / "data" / "projects" / safe_segment(project_name)
+
+    def _resolve_project_file(self, *, project_name: str, path: str) -> tuple[Path, Path, str]:
+        root = self._project_data_root(project_name).resolve()
+        raw_path = Path(path)
+        target = (raw_path if raw_path.is_absolute() else root / raw_path).resolve()
+        try:
+            relative_path = target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Можно удалять только файлы внутри папки выбранного проекта.") from exc
+        if not target.is_file():
+            raise FileNotFoundError(f"Файл не найден: {target}")
+        kind = self._project_file_kind(relative_path)
+        if kind is None:
+            raise ValueError("Legacy merged-файлы не удаляются из web-flow.")
+        return target, relative_path, kind
 
     def _task_to_export_task(self, task: dict[str, Any]) -> dict[str, Any]:
         export_task: dict[str, Any] = {

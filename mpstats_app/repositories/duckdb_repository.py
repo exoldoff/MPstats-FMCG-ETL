@@ -429,6 +429,16 @@ class DuckDbAppRepository:
 
         return counts
 
+    def delete_pipeline_run(self, run_id: str) -> dict[str, int]:
+        counts = {"pipeline_runs": 0, "download_tasks": 0}
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            counts["pipeline_runs"] = int(con.execute("SELECT COUNT(*) FROM pipeline_runs WHERE id = ?", [run_id]).fetchone()[0])
+            counts["download_tasks"] = int(con.execute("SELECT COUNT(*) FROM download_tasks WHERE run_id = ?", [run_id]).fetchone()[0])
+            con.execute("DELETE FROM download_tasks WHERE run_id = ?", [run_id])
+            con.execute("DELETE FROM pipeline_runs WHERE id = ?", [run_id])
+        return counts
+
     def upsert_category(self, category: dict[str, Any]) -> None:
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
@@ -753,6 +763,9 @@ class DuckDbAppRepository:
             [project_name, int(year), int(month), marketplace_code, category_key],
         )
 
+    def get_cube_entry_by_id(self, entry_id: str) -> dict[str, Any] | None:
+        return self._fetch_one("SELECT * FROM cube_registry WHERE id = ?", [entry_id])
+
     def upsert_cube_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
         entry_id = str(entry.get("id") or uuid4().hex)
         with self._lock, connect(self.settings.db_path) as con:
@@ -813,6 +826,227 @@ class DuckDbAppRepository:
             """,
             [project_name, int(limit)],
         )
+
+    def list_cube_registry_by_source_file(self, *, project_name: str, source_file_path: str) -> list[dict[str, Any]]:
+        return self._fetch_records(
+            """
+            SELECT *
+            FROM cube_registry
+            WHERE project_name = ? AND source_processed_file_path = ?
+            ORDER BY year DESC, month DESC, category_name, marketplace
+            """,
+            [project_name, source_file_path],
+        )
+
+    def delete_cube_entry(self, *, entry_id: str, table_name: str) -> dict[str, Any]:
+        counts: dict[str, int] = {"cube_registry": 0, "product_rows": 0, "download_tasks": 0}
+        run_ids: set[str] = set()
+        deleted_entry: dict[str, Any] | None = None
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            result = con.execute("SELECT * FROM cube_registry WHERE id = ?", [entry_id])
+            columns = [col[0] for col in result.description]
+            row = result.fetchone()
+            if not row:
+                return {"entry_id": entry_id, "deleted": counts, "entry": None}
+            deleted_entry = clean_record(dict(zip(columns, row)))
+            project_name = str(deleted_entry["project_name"])
+            year = int(deleted_entry["year"])
+            month = int(deleted_entry["month"])
+            marketplace_code = str(deleted_entry["marketplace_code"])
+            category_key = str(deleted_entry["category_key"])
+
+            products_exists = bool(
+                con.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = 'main' AND table_name = ?
+                    """,
+                    [table_name],
+                ).fetchone()[0]
+            )
+            if products_exists:
+                product_columns = {
+                    str(product_column[0])
+                    for product_column in con.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'main' AND table_name = ?
+                        """,
+                        [table_name],
+                    ).fetchall()
+                }
+                required = {"__project_name", "__year", "__month", "__marketplace_code", "__category_key"}
+                if required.issubset(product_columns):
+                    quoted_table = quote_identifier(table_name)
+                    where_sql = f"""
+                        {quote_duckdb_name('__project_name')} = ?
+                        AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
+                        AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
+                        AND {quote_duckdb_name('__marketplace_code')} = ?
+                        AND {quote_duckdb_name('__category_key')} = ?
+                    """
+                    params = [project_name, year, month, marketplace_code, category_key]
+                    counts["product_rows"] = int(
+                        con.execute(f"SELECT COUNT(*) FROM {quoted_table} WHERE {where_sql}", params).fetchone()[0]
+                    )
+                    if counts["product_rows"]:
+                        con.execute(f"DELETE FROM {quoted_table} WHERE {where_sql}", params)
+
+            run_ids = {
+                str(task_row[0])
+                for task_row in con.execute(
+                    """
+                    SELECT DISTINCT run_id
+                    FROM download_tasks
+                    WHERE project_name = ?
+                      AND year = ?
+                      AND month = ?
+                      AND marketplace_code = ?
+                      AND category_key = ?
+                    """,
+                    [project_name, year, month, marketplace_code, category_key],
+                ).fetchall()
+                if task_row[0] is not None
+            }
+            counts["download_tasks"] = int(
+                con.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM download_tasks
+                    WHERE project_name = ?
+                      AND year = ?
+                      AND month = ?
+                      AND marketplace_code = ?
+                      AND category_key = ?
+                    """,
+                    [project_name, year, month, marketplace_code, category_key],
+                ).fetchone()[0]
+            )
+            con.execute(
+                """
+                UPDATE download_tasks
+                SET
+                    save_status = 'pending',
+                    status = CASE
+                        WHEN classify_status = 'classified' THEN 'classified'
+                        WHEN process_status = 'processed' THEN 'processed'
+                        WHEN download_status = 'downloaded' THEN 'downloaded'
+                        ELSE 'pending'
+                    END,
+                    error_message = NULL,
+                    updated_at = now()
+                WHERE project_name = ?
+                  AND year = ?
+                  AND month = ?
+                  AND marketplace_code = ?
+                  AND category_key = ?
+                """,
+                [project_name, year, month, marketplace_code, category_key],
+            )
+            counts["cube_registry"] = int(con.execute("SELECT COUNT(*) FROM cube_registry WHERE id = ?", [entry_id]).fetchone()[0])
+            con.execute("DELETE FROM cube_registry WHERE id = ?", [entry_id])
+
+        for run_id in run_ids:
+            self.refresh_pipeline_run_counts(run_id)
+        return {"entry_id": entry_id, "deleted": counts, "entry": deleted_entry}
+
+    def mark_project_file_deleted(self, *, project_name: str, file_path: str, file_kind: str) -> dict[str, int]:
+        if file_kind not in {"raw", "processed", "classified"}:
+            return {"download_tasks": 0}
+
+        path_column = {
+            "raw": "raw_file_path",
+            "processed": "processed_file_path",
+            "classified": "classified_file_path",
+        }[file_kind]
+        run_ids: set[str] = set()
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            run_ids = {
+                str(task_row[0])
+                for task_row in con.execute(
+                    f"""
+                    SELECT DISTINCT run_id
+                    FROM download_tasks
+                    WHERE project_name = ? AND {path_column} = ?
+                    """,
+                    [project_name, file_path],
+                ).fetchall()
+                if task_row[0] is not None
+            }
+            count = int(
+                con.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM download_tasks
+                    WHERE project_name = ? AND {path_column} = ?
+                    """,
+                    [project_name, file_path],
+                ).fetchone()[0]
+            )
+            if not count:
+                return {"download_tasks": 0}
+
+            if file_kind == "raw":
+                con.execute(
+                    """
+                    UPDATE download_tasks
+                    SET
+                        download_status = 'pending',
+                        status = CASE
+                            WHEN save_status = 'saved_to_db' THEN status
+                            WHEN classify_status = 'classified' THEN status
+                            WHEN process_status = 'processed' THEN status
+                            ELSE 'pending'
+                        END,
+                        updated_at = now()
+                    WHERE project_name = ? AND raw_file_path = ?
+                    """,
+                    [project_name, file_path],
+                )
+            elif file_kind == "processed":
+                con.execute(
+                    """
+                    UPDATE download_tasks
+                    SET
+                        process_status = 'pending',
+                        classify_status = CASE WHEN classify_status = 'classified' THEN classify_status ELSE 'pending' END,
+                        save_status = CASE WHEN save_status = 'saved_to_db' THEN save_status ELSE 'pending' END,
+                        status = CASE
+                            WHEN save_status = 'saved_to_db' THEN status
+                            WHEN classify_status = 'classified' THEN status
+                            WHEN download_status = 'downloaded' THEN 'downloaded'
+                            ELSE 'pending'
+                        END,
+                        updated_at = now()
+                    WHERE project_name = ? AND processed_file_path = ?
+                    """,
+                    [project_name, file_path],
+                )
+            else:
+                con.execute(
+                    """
+                    UPDATE download_tasks
+                    SET
+                        classify_status = 'pending',
+                        save_status = 'pending',
+                        status = CASE
+                            WHEN process_status = 'processed' THEN 'processed'
+                            WHEN download_status = 'downloaded' THEN 'downloaded'
+                            ELSE 'pending'
+                        END,
+                        updated_at = now()
+                    WHERE project_name = ? AND classified_file_path = ?
+                    """,
+                    [project_name, file_path],
+                )
+
+        for run_id in run_ids:
+            self.refresh_pipeline_run_counts(run_id)
+        return {"download_tasks": count}
 
     def latest_cube_month(self, *, project_name: str) -> tuple[int, int] | None:
         row = self._fetch_one(
