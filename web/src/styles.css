@@ -1302,6 +1302,29 @@ th:nth-last-child(-n + 2) .column-filter-menu {
   background: #fbfcfc;
 }
 
+.classifier-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  min-height: 320px;
+  padding: 28px;
+  border: 1px dashed #c1d0d4;
+  border-radius: 8px;
+  background: #fbfcfc;
+  text-align: center;
+}
+
+.classifier-empty-state svg {
+  color: #1f6f68;
+}
+
+.classifier-empty-state h3 {
+  max-width: 420px;
+  color: #20363a;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
 .catalog-filter-builder {
   display: grid;
   gap: 9px;

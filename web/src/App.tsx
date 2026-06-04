@@ -587,7 +587,7 @@ export function App() {
     if (rulesResult.status === "fulfilled") {
       setRulesPath(rulesResult.value.path);
       setClassifierRules(rulesResult.value.rules);
-      setSelectedRuleId((prev) => prev ?? rulesResult.value.rules[0]?.id ?? null);
+      setSelectedRuleId((prev) => (prev && rulesResult.value.rules.some((rule) => rule.id === prev) ? prev : null));
     } else {
       addLoadError(loadErrors, "Правила классификатора", rulesResult.reason);
     }
@@ -1156,7 +1156,7 @@ export function App() {
       return haystack.includes(text);
     });
   }, [classifierRules, classifierQuery]);
-  const selectedRule = useMemo(() => classifierRules.find((rule) => rule.id === selectedRuleId) ?? classifierRules[0] ?? null, [classifierRules, selectedRuleId]);
+  const selectedRule = useMemo(() => classifierRules.find((rule) => rule.id === selectedRuleId) ?? null, [classifierRules, selectedRuleId]);
   const filteredProjects = useMemo(() => {
     const text = projectQuery.trim().toLowerCase();
     if (!text) return projects;
@@ -1383,6 +1383,15 @@ export function App() {
   function deleteRule(id: string) {
     setClassifierRules((prev) => prev.filter((rule) => rule.id !== id));
     setSelectedRuleId((prev) => (prev === id ? null : prev));
+  }
+
+  async function saveClassifierRules() {
+    const selectedIndex = classifierRules.findIndex((rule) => rule.id === selectedRuleId);
+    await runAction("Сохранение правил классификатора", () => api.saveClassifierRules(classifierRules), (response) => {
+      setRulesPath(response.path);
+      setClassifierRules(response.rules);
+      setSelectedRuleId(selectedIndex >= 0 ? response.rules[selectedIndex]?.id ?? null : null);
+    });
   }
 
   async function classifyExternalFile() {
@@ -2019,11 +2028,7 @@ export function App() {
               onConditionChange={updateCondition}
               onAddCondition={addCondition}
               onDeleteCondition={deleteCondition}
-              onSave={() => void runAction("Сохранение правил классификатора", () => api.saveClassifierRules(classifierRules), (response) => {
-                setRulesPath(response.path);
-                setClassifierRules(response.rules);
-                setSelectedRuleId(response.rules[0]?.id ?? null);
-              })}
+              onSave={() => void saveClassifierRules()}
               externalFile={externalClassifierFile}
               externalWriteXlsx={externalClassifierWriteXlsx}
               externalResult={externalClassifierResult}
@@ -3481,7 +3486,7 @@ function ClassifierRulesEditor(props: {
           <Search size={17} />
           <input value={props.query} onChange={(event) => props.onQueryChange(event.target.value)} placeholder="Найти правило, колонку или текст" />
         </label>
-        <button className="ghost-button" title="Создать пустое правило классификации." onClick={props.onAdd}><Plus size={17} />Пустое правило</button>
+        <button className="ghost-button" title="Создать новое правило классификации." onClick={props.onAdd}><Plus size={17} />Создать новое</button>
         <button className="ghost-button" title="Скопировать выбранное правило." disabled={!rule} onClick={() => rule && props.onDuplicate(rule)}><Copy size={17} />Дублировать</button>
         <button className="ghost-button" title="Записать правила в classifiers/rules.csv." onClick={props.onSave}><Save size={17} />Сохранить правила</button>
       </div>
@@ -3604,7 +3609,15 @@ function ClassifierRulesEditor(props: {
               <Trash2 size={17} />Удалить правило
             </button>
           </div>
-        ) : <Empty text="Выбери правило или создай новое." />}
+        ) : (
+          <div className="classifier-empty-state">
+            <CircleHelp size={26} />
+            <h3>Выбери существующее правило или нажми создать новое</h3>
+            <button className="ghost-button" onClick={props.onAdd}>
+              <Plus size={17} />Создать новое
+            </button>
+          </div>
+        )}
         <FilterableTable
           className="editor-list"
           rows={props.rules}
