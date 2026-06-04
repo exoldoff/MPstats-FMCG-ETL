@@ -41,7 +41,8 @@ IDENTIFIER_COLUMNS = (
     "nmId",
     "nm_id",
 )
-WEIGHT_COLUMNS = ("Вес, кг", "Вес кг", "weight_kg", "parsed_weight_kg")
+TOTAL_WEIGHT_COLUMNS = ("Вес, кг (сумм.)",)
+WEIGHT_COLUMNS = ("Вес, кг", *TOTAL_WEIGHT_COLUMNS, "Вес кг", "weight_kg", "parsed_weight_kg")
 RAW_WEIGHT_COLUMNS = ("Вес, кг сырой", "raw_weight_kg")
 VOLUME_COLUMNS = ("Объем, кг", "Объём, кг", "Объем, т", "Объём, т", "Объем, л", "Объём, л", "volume_kg", "volume_l")
 
@@ -225,7 +226,7 @@ class DataQualityService:
             numeric = _numeric_series(df[column])
             present = numeric.notna()
             zero_or_negative |= (present & numeric.lt(0)).fillna(False)
-            if _normalized(column) in {_normalized(item) for item in VOLUME_COLUMNS}:
+            if _normalized(column) in {_normalized(item) for item in VOLUME_COLUMNS + TOTAL_WEIGHT_COLUMNS}:
                 too_large |= numeric.gt(MAX_REASONABLE_VOLUME_KG).fillna(False)
             else:
                 too_large |= numeric.gt(MAX_REASONABLE_WEIGHT_KG).fillna(False)

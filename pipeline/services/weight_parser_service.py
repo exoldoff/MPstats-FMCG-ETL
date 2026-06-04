@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import traceback
@@ -39,6 +40,8 @@ SINGLE = re.compile(rf"(?P<qty>{NUM})\s*(?P<unit>{UNIT})(?=\W|$)", re.IGNORECASE
 RX_L_BIG = re.compile(rf"\b(\d{{3,4}})\s*({L_UNITS})\b", re.IGNORECASE)
 RX_ML_LONG = re.compile(rf"\b(\d{{6,12}})\s*({ML_UNITS})\b", re.IGNORECASE)
 
+TOTAL_WEIGHT_COLUMN = "Вес, кг (сумм.)"
+
 STEP4_IN_CANON = [
     "Дата",
     "Маркетплейс",
@@ -54,6 +57,7 @@ STEP4_IN_CANON = [
 STEP4_OUT_ORDER = STEP4_IN_CANON + [
     "Вес, кг сырой",
     "Вес, кг",
+    TOTAL_WEIGHT_COLUMN,
     "Вес аномалия",
     "Вес причина",
     "Объем, кг",
@@ -61,6 +65,12 @@ STEP4_OUT_ORDER = STEP4_IN_CANON + [
     "Год",
     "Цена за кг",
 ]
+
+
+@dataclass(frozen=True)
+class WeightExtraction:
+    unit_kg: float
+    total_kg: float
 
 
 def normalize_text(value: str) -> str:
@@ -84,7 +94,7 @@ def unit_to_kg(qty: float, unit: str) -> float:
     return 0.0
 
 
-def extract_weight_kg_from_name(name: str | None) -> float | None:
+def extract_weight_from_name(name: str | None) -> WeightExtraction | None:
     if name is None:
         return None
     text = normalize_text(str(name))
@@ -92,6 +102,7 @@ def extract_weight_kg_from_name(name: str | None) -> float | None:
         return None
 
     pack_total_kg = 0.0
+    pack_unit_weights: list[float] = []
 
     def consume(pattern: re.Pattern[str], source: str) -> tuple[float, str]:
         subtotal = 0.0
@@ -100,7 +111,10 @@ def extract_weight_kg_from_name(name: str | None) -> float | None:
             qty = float(match.group("qty"))
             unit = match.group("unit")
             count = int(match.group("count"))
-            subtotal += unit_to_kg(qty, unit) * count
+            unit_kg = unit_to_kg(qty, unit)
+            subtotal += unit_kg * count
+            if unit_kg > 0:
+                pack_unit_weights.append(unit_kg)
             spans.append((match.start(), match.end()))
         if not spans:
             return 0.0, source
@@ -121,8 +135,26 @@ def extract_weight_kg_from_name(name: str | None) -> float | None:
     pack_total_kg += subtotal
 
     singles = [unit_to_kg(float(match.group("qty")), match.group("unit")) for match in SINGLE.finditer(text)]
-    result = max(pack_total_kg, max(singles) if singles else 0.0)
-    return None if result <= 0 else result
+    single_weight = max(singles) if singles else 0.0
+    if pack_total_kg > 0 and pack_unit_weights:
+        unit_kg = max(pack_unit_weights)
+        total_kg = max(pack_total_kg, single_weight)
+    else:
+        unit_kg = single_weight
+        total_kg = single_weight
+    if unit_kg <= 0 or total_kg <= 0:
+        return None
+    return WeightExtraction(unit_kg=unit_kg, total_kg=total_kg)
+
+
+def extract_weight_kg_from_name(name: str | None) -> float | None:
+    extracted = extract_weight_from_name(name)
+    return extracted.unit_kg if extracted else None
+
+
+def extract_total_weight_kg_from_name(name: str | None) -> float | None:
+    extracted = extract_weight_from_name(name)
+    return extracted.total_kg if extracted else None
 
 
 def fix_liters_decimal_shift(num: int) -> float:
@@ -206,6 +238,7 @@ def apply_step4_output_schema(df: pd.DataFrame) -> pd.DataFrame:
     out["Средняя цена, руб"] = pd.to_numeric(out["Средняя цена, руб"], errors="coerce").astype("float64")
     out["Вес, кг сырой"] = pd.to_numeric(out["Вес, кг сырой"], errors="coerce").astype("float64")
     out["Вес, кг"] = pd.to_numeric(out["Вес, кг"], errors="coerce").astype("float64")
+    out[TOTAL_WEIGHT_COLUMN] = pd.to_numeric(out[TOTAL_WEIGHT_COLUMN], errors="coerce").astype("float64")
     out["Вес аномалия"] = out["Вес аномалия"].fillna(False).astype(bool)
     out["Объем, кг"] = pd.to_numeric(out["Объем, кг"], errors="coerce").fillna(0.0).astype("float64")
     out["Объем, т"] = pd.to_numeric(out["Объем, т"], errors="coerce").fillna(0.0).astype("float64")
@@ -225,19 +258,27 @@ def parse_weights_dataframe(df: pd.DataFrame, *, max_weight_kg: float = 40.0) ->
         out["Продажи"].astype(str).str.replace("\u00a0", "", regex=False).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
     )
     out["Продажи"] = pd.to_numeric(out["Продажи"], errors="coerce").fillna(0)
-    out["Вес, кг сырой"] = out["Название"].apply(extract_weight_kg_from_name)
+    extracted_weights = out["Название"].apply(extract_weight_from_name)
+    out["Вес, кг сырой"] = extracted_weights.apply(lambda value: value.unit_kg if value else np.nan)
+    total_weight_raw = extracted_weights.apply(lambda value: value.total_kg if value else np.nan)
 
     fixes = out.apply(lambda row: sanitize_weight_kg(row["Название"], row["Вес, кг сырой"], max_weight_kg), axis=1)
     out["Вес, кг"] = fixes.apply(lambda value: value[0])
+    weight_multiplier = total_weight_raw / out["Вес, кг сырой"]
+    out[TOTAL_WEIGHT_COLUMN] = np.where(
+        out["Вес, кг"].notna() & np.isfinite(weight_multiplier),
+        out["Вес, кг"] * weight_multiplier,
+        np.nan,
+    )
     out["Вес аномалия"] = fixes.apply(lambda value: value[1])
     out["Вес причина"] = fixes.apply(lambda value: value[2])
-    out["Объем, кг"] = out["Продажи"] * out["Вес, кг"].fillna(0)
+    out["Объем, кг"] = out["Продажи"] * out[TOTAL_WEIGHT_COLUMN].fillna(0)
     out["Объем, т"] = out["Объем, кг"] / 1000.0
     out["Год"] = pd.to_datetime(out["Дата"], errors="coerce", dayfirst=True).dt.year
     out["Средняя цена"] = money_to_float(out["Средняя цена"])
     out["Цена за кг"] = np.where(
-        out["Вес, кг"].notna() & (out["Вес, кг"] > 0) & out["Средняя цена"].notna(),
-        out["Средняя цена"] / out["Вес, кг"],
+        out[TOTAL_WEIGHT_COLUMN].notna() & (out[TOTAL_WEIGHT_COLUMN] > 0) & out["Средняя цена"].notna(),
+        out["Средняя цена"] / out[TOTAL_WEIGHT_COLUMN],
         np.nan,
     )
     return apply_step4_output_schema(out)

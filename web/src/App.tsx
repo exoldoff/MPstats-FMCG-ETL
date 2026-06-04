@@ -151,7 +151,7 @@ type PipelineOperation = {
   finishedAt: number | null;
 };
 
-const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Подкатегория", "Тип", "Вид мяса"];
+const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (сумм.)", "Подкатегория", "Тип", "Вид мяса"];
 
 const statusLabels: Record<string, string> = {
   raw: "raw",

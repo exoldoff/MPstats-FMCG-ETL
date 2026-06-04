@@ -615,8 +615,8 @@ class WebApiTest(unittest.TestCase):
             write_semicolon_csv(
                 pd.DataFrame(
                     [
-                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-1", "Название": "лимон 1 кг", "Бренд": "Brand A", "Продажи, шт": 3},
-                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-2", "Название": "лимон 2 кг", "Бренд": "Brand B", "Продажи, шт": 5},
+                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-1", "Название": "лимон 1 кг", "Бренд": "Brand A", "Продажи, шт": 3, "Вес, кг": "1,0", "Вес, кг (сумм.)": "1,0"},
+                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-2", "Название": "лимон 2 кг", "Бренд": "Brand B", "Продажи, шт": 5, "Вес, кг": "0,5", "Вес, кг (сумм.)": "1,5"},
                         {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-0", "Название": "лимон без продаж", "Бренд": "Brand Z", "Продажи, шт": 0},
                     ]
                 ),
@@ -672,7 +672,7 @@ class WebApiTest(unittest.TestCase):
                     "category_keys": ["lemon-oz"],
                     "period_from": "2025-01",
                     "period_to": "2025-01",
-                    "selected_columns": ["SKU", "Название", "Бренд", "Продажи, шт"],
+                    "selected_columns": ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"],
                     "filters": [
                         {"column": "Название", "match_type": "contains", "value": "лимон"},
                         {"column": "Продажи, шт", "match_type": "gt", "value": "0"},
@@ -688,7 +688,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(preview.status_code, 200)
                 preview_data = preview.json()
                 self.assertEqual(preview_data["total"], 2)
-                self.assertEqual(preview_data["columns"], ["SKU", "Название", "Бренд", "Продажи, шт"])
+                self.assertEqual(preview_data["columns"], ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"])
                 self.assertEqual(preview_data["breakdown"][0]["period"], "2025-01")
                 self.assertEqual(preview_data["breakdown"][0]["rows_count"], 2)
                 excluded_hash = preview_data["rows"][0]["__row_hash"]
@@ -714,7 +714,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(template_payload["name"], "Ежемесячный лимон")
                 self.assertEqual(template_payload["project_name"], "unit")
                 self.assertEqual(template_payload["category_keys"], ["lemon-oz"])
-                self.assertEqual(template_payload["selected_columns"], ["SKU", "Название", "Бренд", "Продажи, шт"])
+                self.assertEqual(template_payload["selected_columns"], ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"])
 
                 templates = client.get("/api/exports/templates", params={"project_name": "unit"})
                 self.assertEqual(templates.status_code, 200)
@@ -756,11 +756,15 @@ class WebApiTest(unittest.TestCase):
                 workbook = load_workbook(xlsx_path, read_only=False)
                 worksheet = workbook.active
                 headers = [cell.value for cell in worksheet[1]]
-                self.assertEqual(headers, ["SKU", "Название", "Бренд", "Продажи, шт"])
+                self.assertEqual(headers, ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"])
                 self.assertNotIn("__row_hash", headers)
                 self.assertIsNone(worksheet.auto_filter.ref)
                 self.assertIsInstance(worksheet["D2"].value, (int, float))
                 self.assertEqual(worksheet["D2"].value, 5)
+                self.assertIsInstance(worksheet["E2"].value, (int, float))
+                self.assertIsInstance(worksheet["F2"].value, (int, float))
+                self.assertEqual(worksheet["E2"].value, 0.5)
+                self.assertEqual(worksheet["F2"].value, 1.5)
 
                 downloaded = client.get("/api/exports/download-file", params={"path": str(xlsx_path)})
                 self.assertEqual(downloaded.status_code, 200)
@@ -1584,8 +1588,21 @@ class WebApiTest(unittest.TestCase):
 
                 reclassified = client.post(f"/api/workflow/pipeline/runs/{run_id}/reclassify-cube", json={"wait": True})
                 self.assertEqual(reclassified.status_code, 200)
-                self.assertEqual(reclassified.json()["completed_tasks"], 4)
-                self.assertEqual(reclassified.json()["failed_tasks"], 0)
+                reclassified_payload = reclassified.json()
+                self.assertEqual(reclassified_payload["completed_tasks"], 4)
+                self.assertEqual(reclassified_payload["failed_tasks"], 0)
+                self.assertEqual(
+                    reclassified_payload["operation_progress"],
+                    {
+                        "kind": "reclassify",
+                        "total_files": 4,
+                        "completed_files": 4,
+                        "failed_files": 0,
+                        "remaining_files": 0,
+                        "progress": 100.0,
+                        "status": "succeeded",
+                    },
+                )
                 corrected_search = client.get("/api/products", params={"query": "исправленный", "limit": 100})
                 self.assertEqual(corrected_search.status_code, 200)
                 corrected_payload = corrected_search.json()

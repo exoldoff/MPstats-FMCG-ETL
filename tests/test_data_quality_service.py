@@ -88,6 +88,30 @@ class DataQualityServiceTest(unittest.TestCase):
             self.assertEqual(report["metrics"]["anomalies"]["suspicious"], 1)
             self.assertEqual(len(report["examples"]["anomalies"]), 3)
 
+    def test_total_pack_weight_does_not_use_unit_weight_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_quality_csv(
+                root,
+                "unit",
+                [
+                    {
+                        "Название": "Большой мультипак",
+                        "Маркетплейс": "Ozon",
+                        "Категория": "Тест",
+                        "SKU": "sku-pack",
+                        "Вес, кг": 1.0,
+                        "Вес, кг (сумм.)": 50.0,
+                        "Подкатегория": "Тест",
+                    },
+                ],
+            )
+
+            report = make_service(root).build_report("unit")
+
+            self.assertEqual(report["status"], "OK")
+            self.assertEqual(report["metrics"]["anomalies"]["too_large"], 0)
+
     def test_duplicates_are_checked_by_full_row_not_identifier(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
