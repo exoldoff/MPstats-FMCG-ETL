@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timedelta
 import hashlib
+import io
 import json
 from pathlib import Path
 from threading import RLock
@@ -11,7 +13,7 @@ from uuid import uuid4
 import pandas as pd
 
 from pipeline.repositories.file_repository import read_semicolon_csv
-from pipeline.repositories.sql_repository import apply_migrations, connect, quote_identifier
+from pipeline.repositories.sql_repository import apply_migrations, connect, quote_identifier, sql_literal
 
 from mpstats_app.config import AppSettings
 from mpstats_app.utils import clean_record, clean_records, quote_duckdb_name
@@ -86,6 +88,12 @@ def _filter_positive_cube_rows(df: pd.DataFrame) -> pd.DataFrame:
     if volume_column:
         mask &= _numeric_filter_values(df[volume_column]) > 0
     return df.loc[mask].copy()
+
+
+def _csv_header_prefix(columns: list[str]) -> str:
+    buffer = io.StringIO()
+    csv.writer(buffer, delimiter=";", lineterminator="\n").writerow(columns)
+    return "\ufeff" + buffer.getvalue()
 
 
 def _period_index_to_label(index: int) -> str:
@@ -1963,6 +1971,60 @@ class DuckDbAppRepository:
                 """,
                 [*params, max(1, int(limit)), max(0, int(offset))],
             ).fetchdf()
+
+    def export_products_to_csv(
+        self,
+        *,
+        table_name: str,
+        target: str | Path,
+        project_name: str,
+        output_columns: list[str],
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+        filters: list[dict[str, str]] | None = None,
+        excluded_row_hashes: list[str] | None = None,
+        sort_column: str | None = None,
+        sort_direction: str = "asc",
+        default_order: bool = False,
+    ) -> Path:
+        columns = self.table_columns(table_name)
+        self._require_export_metadata(columns)
+        selected_columns = self._safe_export_columns(columns, output_columns)
+        select_sql = ", ".join(quote_duckdb_name(column) for column in selected_columns)
+        where_sql, params = self._export_where_sql(
+            columns=columns,
+            project_name=project_name,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+            filters=filters,
+            excluded_row_hashes=excluded_row_hashes,
+        )
+        order_sql = self._export_order_sql(
+            columns=columns,
+            sort_column=sort_column,
+            sort_direction=sort_direction,
+            default_order=default_order,
+        )
+        output_path = Path(target)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        header_prefix = _csv_header_prefix(selected_columns)
+        with self._lock, connect(self.settings.db_path) as con:
+            apply_migrations(con)
+            con.execute(
+                f"""
+                COPY (
+                    SELECT {select_sql}
+                    FROM {quote_identifier(table_name)}
+                    {where_sql}
+                    {order_sql}
+                ) TO {sql_literal(str(output_path))}
+                (FORMAT csv, DELIMITER ';', HEADER false, PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')
+                """,
+                params,
+            )
+        return output_path
 
     def _report_query_sql(
         self,

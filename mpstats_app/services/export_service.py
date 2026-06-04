@@ -648,33 +648,25 @@ class ExportService:
         return written
 
     def _write_csv(self, *, target: Path, spec: ExportSpec, rows_in_part: int, base_offset: int, row_callback: Any | None = None) -> int:
-        written = 0
-        header = True
-        while written < rows_in_part:
-            batch_size = min(EXPORT_BATCH_SIZE, rows_in_part - written)
-            df = self.repository.fetch_export_products_dataframe(
-                table_name=self.settings.products_table,
-                project_name=spec.project_name,
-                output_columns=spec.selected_columns,
-                category_keys=spec.category_keys,
-                period_from_index=spec.period_from_index,
-                period_to_index=spec.period_to_index,
-                filters=spec.filters,
-                excluded_row_hashes=spec.excluded_row_hashes,
-                sort_column=spec.sort_column,
-                sort_direction=spec.sort_direction,
-                limit=batch_size,
-                offset=base_offset + written,
-                include_row_hash=False,
-            )
-            if df.empty:
-                break
-            df.to_csv(target, sep=";", index=False, mode="w" if header else "a", header=header, encoding="utf-8-sig" if header else "utf-8")
-            header = False
-            written += len(df)
-            if row_callback:
-                row_callback(len(df), target.name)
-        return written
+        if row_callback:
+            row_callback(0, target.name)
+        self.repository.export_products_to_csv(
+            table_name=self.settings.products_table,
+            target=target,
+            project_name=spec.project_name,
+            output_columns=spec.selected_columns,
+            category_keys=spec.category_keys,
+            period_from_index=spec.period_from_index,
+            period_to_index=spec.period_to_index,
+            filters=spec.filters,
+            excluded_row_hashes=spec.excluded_row_hashes,
+            sort_column=spec.sort_column,
+            sort_direction=spec.sort_direction,
+            default_order=bool(spec.sort_column),
+        )
+        if row_callback:
+            row_callback(rows_in_part, target.name)
+        return rows_in_part
 
     def _filename(
         self,

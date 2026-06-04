@@ -95,6 +95,16 @@ def table_row_count(con: duckdb.DuckDBPyConnection, table_name: str) -> int:
     return int(row[0]) if row else 0
 
 
+def query_row_count(db_path: str | Path, query: str) -> int:
+    clean_query = query.strip().rstrip(";")
+    if not clean_query:
+        raise ValueError("SQL query is empty.")
+    with connect(db_path) as con:
+        apply_migrations(con)
+        row = con.execute(f"SELECT COUNT(*) FROM ({clean_query}) AS _mpstats_count").fetchone()
+        return int(row[0]) if row else 0
+
+
 def import_dataframe(
     db_path: str | Path,
     table_name: str,

@@ -13,6 +13,8 @@ from pipeline.repositories.sql_repository import (
     import_dataframe,
     list_tables,
     load_history,
+    quote_identifier,
+    query_row_count,
     query_to_dataframe,
     table_to_dataframe,
 )
@@ -89,17 +91,13 @@ def export_sql_to_csv(
     query: str | None = None,
 ) -> StepResult:
     if query:
+        rows = query_row_count(db_path, query)
         out = export_query_to_csv(db_path, query, output_file)
     elif table_name:
+        rows = query_row_count(db_path, f"SELECT * FROM {quote_identifier(table_name)}")
         out = export_table_to_csv(db_path, table_name, output_file)
     else:
         raise ValueError("Нужно передать table_name или query.")
-
-    rows = 0
-    try:
-        rows = len(read_semicolon_csv(out, low_memory=False))
-    except Exception:
-        rows = 0
 
     result = StepResult(name="sql_export", ok=1, rows=rows, output=out)
     result.add_detail(db_path=str(db_path), table_name=table_name, query=query, output_file=str(out), rows=rows)

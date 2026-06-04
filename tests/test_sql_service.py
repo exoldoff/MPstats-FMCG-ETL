@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -57,11 +58,15 @@ class SqlServiceTest(unittest.TestCase):
             )
             self.assertEqual(selected.iloc[0]["SKU"], "b")
 
-            exported = export_sql_to_csv(
-                db_path=db_path,
-                output_file=output_file,
-                query='SELECT * FROM mpstats_products ORDER BY "SKU"',
-            )
+            with patch(
+                "pipeline.services.sql_service.read_semicolon_csv",
+                side_effect=AssertionError("sql_export should not re-read the generated CSV"),
+            ):
+                exported = export_sql_to_csv(
+                    db_path=db_path,
+                    output_file=output_file,
+                    query='SELECT * FROM mpstats_products ORDER BY "SKU"',
+                )
             self.assertEqual(exported.rows, 2)
             self.assertTrue(output_file.exists())
 
