@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timedelta
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -12,8 +11,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from pipeline.repositories.file_repository import read_semicolon_csv
-from pipeline.repositories.sql_repository import apply_migrations, connect, quote_identifier, sql_literal
+from pipeline.repositories.sql_repository import apply_migrations, connect, quote_identifier, sql_literal, table_exists
 
 from mpstats_app.config import AppSettings
 from mpstats_app.utils import clean_record, clean_records, quote_duckdb_name
@@ -24,6 +22,17 @@ EXPORT_METADATA_COLUMNS = ("__project_name", "__year", "__month", "__marketplace
 TEXT_DB_TYPES = ("CHAR", "STRING", "TEXT", "VARCHAR")
 CUBE_SALES_FILTER_COLUMNS = ("Продажи, шт", "Продажи", "sales")
 CUBE_VOLUME_FILTER_COLUMNS = ("Объем, кг", "Объём, кг", "Объем, т", "Объём, т", "Объем", "Объём", "volume_kg", "volume_t", "volume")
+IMPORT_METADATA_COLUMNS = (
+    "__run_id",
+    "__source_file",
+    "__imported_at",
+    "__project_name",
+    "__year",
+    "__month",
+    "__marketplace_code",
+    "__category_key",
+    "__row_hash",
+)
 HEAVY_SLICE_ROWS_LIMIT = 250_000
 HEAVY_CATEGORY_ROWS_LIMIT = 1_000_000
 REPORT_REVENUE_COLUMNS = ("Выручка, руб", "Выручка", "revenue")
@@ -51,43 +60,197 @@ def _db_type_accepts_text(data_type: str) -> bool:
     return any(marker in upper_type for marker in TEXT_DB_TYPES)
 
 
-def _series_has_text_values(series: pd.Series) -> bool:
-    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_datetime64_any_dtype(series):
-        return False
-    values = series.dropna()
-    if values.empty:
-        return False
-    text_values = values.astype(str).str.strip()
-    text_values = text_values[text_values != ""]
-    if text_values.empty:
-        return False
-    numeric_values = pd.to_numeric(text_values.str.replace(",", ".", regex=False), errors="coerce")
-    return bool(numeric_values.isna().any())
-
-
-def _first_existing_column(df: pd.DataFrame, columns: tuple[str, ...]) -> str | None:
-    for column in columns:
-        if column in df.columns:
+def _first_existing_column(columns: list[str], candidates: tuple[str, ...]) -> str | None:
+    existing = set(columns)
+    for column in candidates:
+        if column in existing:
             return column
     return None
 
 
-def _numeric_filter_values(series: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors="coerce").fillna(0)
-    text = series.astype("string").str.replace("\u00a0", "", regex=False).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
-    return pd.to_numeric(text, errors="coerce").fillna(0)
+def _stage_column_types(con: Any, table_name: str) -> dict[str, str]:
+    return {
+        str(row[0]): str(row[1]).upper()
+        for row in con.execute(f"DESCRIBE {quote_identifier(table_name)}").fetchall()
+    }
 
 
-def _filter_positive_cube_rows(df: pd.DataFrame) -> pd.DataFrame:
-    sales_column = _first_existing_column(df, CUBE_SALES_FILTER_COLUMNS)
-    volume_column = _first_existing_column(df, CUBE_VOLUME_FILTER_COLUMNS)
-    mask = pd.Series(True, index=df.index)
+def _csv_scan_sql(csv_path: Path) -> str:
+    return (
+        "read_csv("
+        f"{sql_literal(str(csv_path))}, "
+        "delim=';', header=true, all_varchar=true, null_padding=true, ignore_errors=false"
+        ")"
+    )
+
+
+def _number_expr(column: str, *, table_alias: str | None = None) -> str:
+    quoted = quote_duckdb_name(column)
+    if table_alias:
+        quoted = f"{table_alias}.{quoted}"
+    nbsp = "\u00a0"
+    return (
+        "TRY_CAST("
+        f"REPLACE(REPLACE(REPLACE(CAST({quoted} AS VARCHAR), '{nbsp}', ''), ' ', ''), ',', '.') "
+        "AS DOUBLE)"
+    )
+
+
+def _positive_import_filter(columns: list[str]) -> str:
+    filters: list[str] = []
+    sales_column = _first_existing_column(columns, CUBE_SALES_FILTER_COLUMNS)
+    volume_column = _first_existing_column(columns, CUBE_VOLUME_FILTER_COLUMNS)
     if sales_column:
-        mask &= _numeric_filter_values(df[sales_column]) > 0
+        filters.append(f"{_number_expr(sales_column)} > 0")
     if volume_column:
-        mask &= _numeric_filter_values(df[volume_column]) > 0
-    return df.loc[mask].copy()
+        filters.append(f"{_number_expr(volume_column)} > 0")
+    return " AND ".join(filters) if filters else "TRUE"
+
+
+def _hash_expr(columns: list[str], *, project_name: str | None = None, year: int | None = None, month: int | None = None, marketplace_code: str | None = None, category_key: str | None = None) -> str:
+    parts: list[str] = []
+    for value in (project_name, year, month, marketplace_code, category_key):
+        if value is not None:
+            parts.append(sql_literal(str(value)))
+    parts.extend(f"COALESCE(CAST({quote_duckdb_name(column)} AS VARCHAR), '<NULL>')" for column in columns)
+    return "sha1(concat_ws('|', " + ", ".join(parts) + "))"
+
+
+def _stage_has_text_values(con: Any, *, stage_table: str, column: str) -> bool:
+    text_expr = f"NULLIF(TRIM(CAST({quote_duckdb_name(column)} AS VARCHAR)), '')"
+    numeric_expr = _number_expr(column)
+    row = con.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {quote_identifier(stage_table)}
+        WHERE {text_expr} IS NOT NULL
+          AND {numeric_expr} IS NULL
+        """
+    ).fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
+def _cast_for_target_type(column: str, data_type: str, *, table_alias: str | None = None) -> str:
+    quoted = quote_duckdb_name(column)
+    if table_alias:
+        quoted = f"{table_alias}.{quoted}"
+    upper = data_type.upper()
+    if _db_type_accepts_text(upper):
+        return quoted
+    if any(marker in upper for marker in ("INT", "DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC")):
+        return f"TRY_CAST({_number_expr(column, table_alias=table_alias)} AS {upper})"
+    if "DATE" in upper or "TIME" in upper:
+        return f"TRY_CAST({quoted} AS {upper})"
+    if "BOOL" in upper:
+        return f"TRY_CAST({quoted} AS BOOLEAN)"
+    return quoted
+
+
+def _create_products_stage(
+    con: Any,
+    *,
+    csv_path: Path,
+    stage_table: str,
+    run_id: str,
+    source_file: str,
+    project_name: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    marketplace_code: str | None = None,
+    category_key: str | None = None,
+) -> list[str]:
+    raw_table = f"{stage_table}_raw"
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {quote_identifier(raw_table)} AS SELECT * FROM {_csv_scan_sql(csv_path)}")
+    raw_columns = list(_stage_column_types(con, raw_table))
+    source_columns = [column for column in raw_columns if column not in IMPORT_METADATA_COLUMNS]
+    if not source_columns:
+        raise ValueError(f"В файле нет колонок для загрузки в DuckDB: {csv_path}")
+
+    select_parts = [quote_duckdb_name(column) for column in source_columns]
+    select_parts.extend(
+        [
+            f"{sql_literal(run_id)} AS {quote_duckdb_name('__run_id')}",
+            f"{sql_literal(source_file)} AS {quote_duckdb_name('__source_file')}",
+            f"now() AS {quote_duckdb_name('__imported_at')}",
+        ]
+    )
+    if project_name is not None:
+        select_parts.append(f"{sql_literal(project_name)} AS {quote_duckdb_name('__project_name')}")
+    if year is not None:
+        select_parts.append(f"{int(year)} AS {quote_duckdb_name('__year')}")
+    if month is not None:
+        select_parts.append(f"{int(month)} AS {quote_duckdb_name('__month')}")
+    if marketplace_code is not None:
+        select_parts.append(f"{sql_literal(marketplace_code)} AS {quote_duckdb_name('__marketplace_code')}")
+    if category_key is not None:
+        select_parts.append(f"{sql_literal(category_key)} AS {quote_duckdb_name('__category_key')}")
+    select_parts.append(
+        f"{_hash_expr(source_columns, project_name=project_name, year=year, month=month, marketplace_code=marketplace_code, category_key=category_key)} "
+        f"AS {quote_duckdb_name('__row_hash')}"
+    )
+    positive_filter = _positive_import_filter(source_columns)
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE {quote_identifier(stage_table)} AS
+        SELECT * EXCLUDE (__row_number)
+        FROM (
+            SELECT
+                {", ".join(select_parts)},
+                ROW_NUMBER() OVER (
+                    PARTITION BY {_hash_expr(source_columns, project_name=project_name, year=year, month=month, marketplace_code=marketplace_code, category_key=category_key)}
+                    ORDER BY {_hash_expr(source_columns, project_name=project_name, year=year, month=month, marketplace_code=marketplace_code, category_key=category_key)}
+                ) AS __row_number
+            FROM {quote_identifier(raw_table)}
+            WHERE {positive_filter}
+        )
+        WHERE __row_number = 1
+        """
+    )
+    return list(_stage_column_types(con, stage_table))
+
+
+def _ensure_table_accepts_stage_columns(con: Any, *, table_name: str, quoted_table: str, stage_table: str, stage_columns: list[str]) -> dict[str, str]:
+    column_types = _table_column_types(con, table_name)
+    stage_types = _stage_column_types(con, stage_table)
+    for column in stage_columns:
+        column_name = str(column)
+        if column_name not in column_types:
+            con.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {quote_duckdb_name(column_name)} {stage_types[column_name]}")
+            column_types[column_name] = stage_types[column_name]
+            continue
+        if _db_type_accepts_text(column_types[column_name]):
+            continue
+        if column_name.startswith("__"):
+            continue
+        if _stage_has_text_values(con, stage_table=stage_table, column=column_name):
+            con.execute(f"ALTER TABLE {quoted_table} ALTER COLUMN {quote_duckdb_name(column_name)} TYPE VARCHAR")
+            column_types[column_name] = "VARCHAR"
+    return column_types
+
+
+def _insert_stage_sql(*, quoted_table: str, stage_table: str, columns: list[str], target_types: dict[str, str], deduplicate: bool) -> str:
+    quoted_columns = ", ".join(quote_duckdb_name(column) for column in columns)
+    selected_columns = ", ".join(f"{_cast_for_target_type(column, target_types[column], table_alias='s')} AS {quote_duckdb_name(column)}" for column in columns)
+    dedupe_sql = ""
+    if deduplicate:
+        dedupe_sql = f"""
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM {quoted_table} t
+            WHERE t.{quote_duckdb_name('__row_hash')} = s.{quote_duckdb_name('__row_hash')}
+        )
+        """
+    return f"""
+        INSERT INTO {quoted_table} ({quoted_columns})
+        SELECT {selected_columns}
+        FROM {quote_identifier(stage_table)} s
+        {dedupe_sql}
+    """
+
+
+def _stage_count(con: Any, stage_table: str) -> int:
+    row = con.execute(f"SELECT COUNT(*) FROM {quote_identifier(stage_table)}").fetchone()
+    return int(row[0]) if row else 0
 
 
 def _csv_header_prefix(columns: list[str]) -> str:
@@ -108,21 +271,6 @@ def _max_iso(left: Any, right: Any) -> Any:
     if right is None:
         return left
     return max(str(left), str(right))
-
-
-def _ensure_table_accepts_source_columns(con: Any, *, table_name: str, quoted_table: str, df: pd.DataFrame) -> None:
-    column_types = _table_column_types(con, table_name)
-    for column in df.columns:
-        column_name = str(column)
-        if column_name not in column_types:
-            con.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {quote_duckdb_name(column_name)} VARCHAR")
-            column_types[column_name] = "VARCHAR"
-            continue
-        if _db_type_accepts_text(column_types[column_name]):
-            continue
-        if _series_has_text_values(df[column]):
-            con.execute(f"ALTER TABLE {quoted_table} ALTER COLUMN {quote_duckdb_name(column_name)} TYPE VARCHAR")
-            column_types[column_name] = "VARCHAR"
 
 
 class DuckDbAppRepository:
@@ -1311,49 +1459,56 @@ class DuckDbAppRepository:
         project_name: str,
         load_name: str | None = None,
     ) -> int:
-        df = read_semicolon_csv(csv_path, low_memory=False)
-        df = _filter_positive_cube_rows(df)
-        df["__run_id"] = run_id
-        df["__source_file"] = str(csv_path)
-        df["__imported_at"] = datetime.now()
-
         quoted_table = quote_identifier(table_name)
+        stage_table = "_mpstats_app_products_stage"
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
-            con.register("_mpstats_app_products_df", df)
+            con.execute("BEGIN")
             try:
-                exists = bool(
-                    con.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM information_schema.tables
-                        WHERE table_schema = 'main' AND table_name = ?
-                        """,
-                        [table_name],
-                    ).fetchone()[0]
+                stage_columns = _create_products_stage(
+                    con,
+                    csv_path=csv_path,
+                    stage_table=stage_table,
+                    run_id=run_id,
+                    source_file=str(csv_path),
+                    project_name=project_name,
                 )
+                rows_loaded = _stage_count(con, stage_table)
+                exists = table_exists(con, table_name)
                 if not exists:
-                    con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM _mpstats_app_products_df")
+                    con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
                 else:
-                    _ensure_table_accepts_source_columns(con, table_name=table_name, quoted_table=quoted_table, df=df)
-                    quoted_columns = ", ".join(quote_duckdb_name(str(column)) for column in df.columns)
-                    con.execute(
-                        f"INSERT INTO {quoted_table} ({quoted_columns}) "
-                        f"SELECT {quoted_columns} FROM _mpstats_app_products_df"
+                    target_types = _ensure_table_accepts_stage_columns(
+                        con,
+                        table_name=table_name,
+                        quoted_table=quoted_table,
+                        stage_table=stage_table,
+                        stage_columns=stage_columns,
                     )
-            finally:
-                con.unregister("_mpstats_app_products_df")
+                    con.execute(
+                        _insert_stage_sql(
+                            quoted_table=quoted_table,
+                            stage_table=stage_table,
+                            columns=stage_columns,
+                            target_types=target_types,
+                            deduplicate=False,
+                        )
+                    )
 
-            con.execute(
-                """
-                INSERT INTO pipeline_loads (
-                    table_name, source_file, load_name, project_name, mode, rows_loaded
+                con.execute(
+                    """
+                    INSERT INTO pipeline_loads (
+                        table_name, source_file, load_name, project_name, mode, rows_loaded
+                    )
+                    VALUES (?, ?, ?, ?, 'append', ?)
+                    """,
+                    [table_name, str(csv_path), load_name or f"app_run:{run_id}", project_name, rows_loaded],
                 )
-                VALUES (?, ?, ?, ?, 'append', ?)
-                """,
-                [table_name, str(csv_path), load_name or f"app_run:{run_id}", project_name, len(df)],
-            )
-        return len(df)
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+        return rows_loaded
 
     def import_products_file_idempotent(
         self,
@@ -1369,67 +1524,37 @@ class DuckDbAppRepository:
         overwrite: bool = False,
         load_name: str | None = None,
     ) -> int:
-        df = read_semicolon_csv(csv_path, low_memory=False)
-        df = _filter_positive_cube_rows(df)
-        df["__run_id"] = run_id
-        df["__source_file"] = str(csv_path)
-        df["__imported_at"] = datetime.now()
-        df["__project_name"] = project_name
-        df["__year"] = int(year)
-        df["__month"] = int(month)
-        df["__marketplace_code"] = marketplace_code
-        df["__category_key"] = category_key
-        df["__row_hash"] = [
-            hashlib.sha1(
-                json.dumps(
-                    {
-                        "project_name": project_name,
-                        "year": int(year),
-                        "month": int(month),
-                        "marketplace_code": marketplace_code,
-                        "category_key": category_key,
-                        "row": {str(key): None if pd.isna(value) else str(value) for key, value in row.items()},
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()
-            for row in df.drop(
-                columns=[
-                    "__run_id",
-                    "__source_file",
-                    "__imported_at",
-                    "__project_name",
-                    "__year",
-                    "__month",
-                    "__marketplace_code",
-                    "__category_key",
-                ]
-            ).to_dict(orient="records")
-        ]
-        df = df.drop_duplicates(subset=["__row_hash"]).copy()
-
         quoted_table = quote_identifier(table_name)
         inserted = 0
+        stage_table = "_mpstats_app_products_stage"
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
-            con.register("_mpstats_app_products_df", df)
+            con.execute("BEGIN")
             try:
-                exists = bool(
-                    con.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM information_schema.tables
-                        WHERE table_schema = 'main' AND table_name = ?
-                        """,
-                        [table_name],
-                    ).fetchone()[0]
+                stage_columns = _create_products_stage(
+                    con,
+                    csv_path=csv_path,
+                    stage_table=stage_table,
+                    run_id=run_id,
+                    source_file=str(csv_path),
+                    project_name=project_name,
+                    year=int(year),
+                    month=int(month),
+                    marketplace_code=marketplace_code,
+                    category_key=category_key,
                 )
+                exists = table_exists(con, table_name)
                 if not exists:
-                    con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM _mpstats_app_products_df")
-                    inserted = len(df)
+                    con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
+                    inserted = _stage_count(con, stage_table)
                 else:
-                    _ensure_table_accepts_source_columns(con, table_name=table_name, quoted_table=quoted_table, df=df)
+                    target_types = _ensure_table_accepts_stage_columns(
+                        con,
+                        table_name=table_name,
+                        quoted_table=quoted_table,
+                        stage_table=stage_table,
+                        stage_columns=stage_columns,
+                    )
                     if overwrite:
                         con.execute(
                             f"""
@@ -1442,13 +1567,11 @@ class DuckDbAppRepository:
                             """,
                             [project_name, int(year), int(month), marketplace_code, category_key],
                         )
-                    quoted_columns = ", ".join(quote_duckdb_name(str(column)) for column in df.columns)
-                    selected_columns = ", ".join(f"d.{quote_duckdb_name(str(column))}" for column in df.columns)
                     inserted = int(
                         con.execute(
                             f"""
                             SELECT COUNT(*)
-                            FROM _mpstats_app_products_df d
+                            FROM {quote_identifier(stage_table)} d
                             WHERE NOT EXISTS (
                                 SELECT 1
                                 FROM {quoted_table} t
@@ -1458,36 +1581,35 @@ class DuckDbAppRepository:
                         ).fetchone()[0]
                     )
                     con.execute(
-                        f"""
-                        INSERT INTO {quoted_table} ({quoted_columns})
-                        SELECT {selected_columns}
-                        FROM _mpstats_app_products_df d
-                        WHERE NOT EXISTS (
-                            SELECT 1
-                            FROM {quoted_table} t
-                            WHERE t.{quote_duckdb_name('__row_hash')} = d.{quote_duckdb_name('__row_hash')}
+                        _insert_stage_sql(
+                            quoted_table=quoted_table,
+                            stage_table=stage_table,
+                            columns=stage_columns,
+                            target_types=target_types,
+                            deduplicate=True,
                         )
-                        """
                     )
-            finally:
-                con.unregister("_mpstats_app_products_df")
 
-            con.execute(
-                """
-                INSERT INTO pipeline_loads (
-                    table_name, source_file, load_name, project_name, mode, rows_loaded
+                con.execute(
+                    """
+                    INSERT INTO pipeline_loads (
+                        table_name, source_file, load_name, project_name, mode, rows_loaded
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        table_name,
+                        str(csv_path),
+                        load_name or f"smart_pipeline:{run_id}",
+                        project_name,
+                        "replace" if overwrite else "append_dedup",
+                        inserted,
+                    ],
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    table_name,
-                    str(csv_path),
-                    load_name or f"smart_pipeline:{run_id}",
-                    project_name,
-                    "replace" if overwrite else "append_dedup",
-                    inserted,
-                ],
-            )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
         return inserted
 
     def search_products(

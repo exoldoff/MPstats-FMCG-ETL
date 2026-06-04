@@ -18,6 +18,7 @@ from mpstats_app.config import AppSettings
 from mpstats_app.main import create_app
 from mpstats_app.repositories.duckdb_repository import DuckDbAppRepository
 from mpstats_app.services.smart_pipeline_service import month_day_coverage
+from mpstats_app.utils import quote_duckdb_name
 from pipeline.repositories.file_repository import write_semicolon_csv
 from pipeline.repositories.sql_repository import connect
 
@@ -189,6 +190,63 @@ class WebApiTest(unittest.TestCase):
             with connect(settings.db_path) as con:
                 rows = con.execute(f"SELECT SKU FROM {settings.products_table}").fetchall()
             self.assertEqual(rows, [("valid",)])
+
+    def test_db_import_idempotent_rerun_does_not_duplicate_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            source_file = root / "products.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"SKU": "sku-1", "Продажи, шт": "5", "Объем, кг": "1.5"},
+                        {"SKU": "sku-2", "Продажи, шт": "7", "Объем, кг": "2.5"},
+                    ]
+                ),
+                source_file,
+            )
+
+            first_inserted = repository.import_products_file_idempotent(
+                run_id="run-1",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+            second_inserted = repository.import_products_file_idempotent(
+                run_id="run-2",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+
+            self.assertEqual(first_inserted, 2)
+            self.assertEqual(second_inserted, 0)
+            with connect(settings.db_path) as con:
+                total = con.execute(f"SELECT COUNT(*) FROM {settings.products_table}").fetchone()[0]
+                duplicate_hashes = con.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT {quote_duckdb_name('__row_hash')}, COUNT(*) AS cnt
+                        FROM {settings.products_table}
+                        GROUP BY {quote_duckdb_name('__row_hash')}
+                        HAVING COUNT(*) > 1
+                    )
+                    """
+                ).fetchone()[0]
+            self.assertEqual(total, 2)
+            self.assertEqual(duplicate_hashes, 0)
 
     def test_health_settings_schedules_and_run_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

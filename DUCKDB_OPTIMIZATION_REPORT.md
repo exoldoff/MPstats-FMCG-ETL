@@ -9,12 +9,42 @@ DuckDB remains the main local analytical engine. The current production workflow
 | Area | Finding | Impact | First action |
 | --- | --- | --- | --- |
 | Legacy SQL service | `pipeline/services/sql_service.py` imported CSV through `pandas.read_csv` and registered the whole DataFrame in DuckDB. | Slow and memory-heavy on large exports. | Removed as non-web legacy path. |
-| Web DB import | `DuckDbAppRepository.import_products_file_idempotent` still reads classified CSV into pandas and calculates row hashes in Python. | High memory use and slow CPU path on 1M+ rows. | Next step: replace with DuckDB staging SQL. |
-| Idempotency | Smart pipeline has `cube_registry` skip and `__row_hash` anti-join. | Good baseline, but the old append import can still duplicate rows. | Next step: remove/replace old append import usages in web services. |
-| Transactions | `DELETE`/`INSERT`/load history/cube registry updates are not consistently grouped. | Partial updates are possible if a save fails mid-flow. | Next step: wrap DB save in explicit transaction. |
+| Web DB import | `DuckDbAppRepository.import_products_file_idempotent` previously read classified CSV into pandas and calculated row hashes in Python. | High memory use and slow CPU path on 1M+ rows. | Done: replaced with DuckDB staging SQL. |
+| Idempotency | Smart pipeline has `cube_registry` skip and `__row_hash` anti-join. | Good baseline. Old append-style web import remains non-idempotent by design. | Smart import now has SQL anti-join; old append usages should be removed in a later cleanup. |
+| Transactions | Import table changes and load history insert were not consistently grouped. | Partial updates were possible if a save failed mid-flow. | Done for products import; cube registry updates remain a separate service operation. |
 | CSV export | Raw export already uses DuckDB `COPY`. Report CSV still fetches aggregate to pandas before writing. | Unneeded pandas materialization for report CSV. | Later step: add direct report `COPY`. |
 | XLSX export | openpyxl write-only mode is safe for formatted/sheet-controlled output. DuckDB Excel extension can write simple XLSX. | pandas/openpyxl should stay only on final aggregates or controlled batches. | Benchmark includes both simple DuckDB XLSX and pandas/openpyxl baseline. |
 | DB settings | Connections use default `duckdb.connect(path)`. | Fine by default, but no central place for `threads`, `memory_limit`, `temp_directory`. | Later step: managed connection helper with optional settings. |
+
+## Implemented changes
+
+### Step 1: cleanup and benchmark
+
+- Removed legacy standalone `pipeline/services/sql_service.py`.
+- Removed its pandas-heavy import/query test.
+- Kept `pipeline/repositories/sql_repository.py` as a small shared DuckDB infrastructure helper for web-app.
+- Added reproducible benchmark scripts and this report.
+
+### Step 2: web import via DuckDB staging
+
+- `DuckDbAppRepository.import_products_file` and `import_products_file_idempotent` now load CSV through DuckDB `read_csv` into temp staging tables.
+- Positive sales/volume filters run in DuckDB SQL before rows reach the products table.
+- `__row_hash` is calculated in DuckDB SQL with `sha1(...)`.
+- Repeated idempotent load uses `INSERT ... SELECT ... WHERE NOT EXISTS` by `__row_hash`.
+- Load table changes and `pipeline_loads` insert are wrapped in an explicit transaction.
+
+DB impact:
+
+- No migration was added in this step.
+- Existing tables are preserved.
+- For newly created products tables, source CSV columns are loaded as `VARCHAR`; metadata columns keep typed SQL expressions (`TIMESTAMP`, integer metadata, hash text). Existing numeric columns are preserved where possible, and text-containing source columns are widened to `VARCHAR` when needed.
+- Existing rows keep their old `__row_hash` values. New rows use SQL-computed `sha1` hashes; smart pipeline also protects existing slices through `cube_registry`.
+
+Quality checks added:
+
+- Regression test: repeating the same period/category import inserts `0` rows on the second run.
+- Regression test: duplicate `__row_hash` count remains `0`.
+- Existing tests still cover positive sales/volume filtering and text widening.
 
 ## Benchmark stand
 
