@@ -157,6 +157,44 @@ class WebApiTest(unittest.TestCase):
             self.assertEqual(data_type, "VARCHAR")
             self.assertEqual(values, [(None,), ("Тростниковый",)])
 
+    def test_db_import_preserves_date_column(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            source_file = root / "products.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Дата": "01.01.2025",
+                            "SKU": "sku-1",
+                            "Продажи, шт": "5",
+                            "Объем, кг": "1,5",
+                        }
+                    ]
+                ),
+                source_file,
+            )
+
+            inserted = repository.import_products_file_idempotent(
+                run_id="run-1",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+
+            self.assertEqual(inserted, 1)
+            with connect(settings.db_path) as con:
+                values = con.execute(f'SELECT "Дата" FROM "{settings.products_table}"').fetchall()
+            self.assertEqual(values, [("01.01.2025",)])
+
     def test_db_import_filters_zero_sales_and_volume_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1116,6 +1154,51 @@ class WebApiTest(unittest.TestCase):
                 with self.assertRaises(Exception):
                     repository.export_query_to_csv("SELECT missing_column FROM missing_table", root / "broken.csv")
             self.assertTrue(any("DuckDB COPY CSV export failed" in message for message in logs.output))
+
+    def test_product_csv_export_preserves_date_column(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            source_file = root / "products.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Дата": "01.01.2025",
+                            "SKU": "sku-1",
+                            "Продажи, шт": "5",
+                            "Объем, кг": "1,5",
+                        }
+                    ]
+                ),
+                source_file,
+            )
+            repository.import_products_file_idempotent(
+                run_id="run-1",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+
+            target = root / "exports" / "products.csv"
+            repository.export_products_to_csv(
+                table_name=settings.products_table,
+                target=target,
+                project_name="unit",
+                output_columns=["Дата", "SKU"],
+                period_from_index=2025 * 12 + 1,
+                period_to_index=2025 * 12 + 1,
+            )
+
+            rows = list(csv.DictReader(StringIO(target.read_text(encoding="utf-8-sig")), delimiter=";"))
+            self.assertEqual(rows, [{"Дата": "01.01.2025", "SKU": "sku-1"}])
 
     def test_flat_csv_decimal_comma_preserves_protected_columns_and_xlsx_types(self) -> None:
         query = """

@@ -35,6 +35,41 @@ class PipelineServicesTest(unittest.TestCase):
         self.assertEqual(extract_marketplace_from_filename(filename), "Ozon")
         self.assertEqual(extract_category_from_filename(filename), "Мясо")
 
+    def test_classification_preserves_date_column(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Подкатегория;Название;contains;лимон;Лимонная;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            input_file = root / "classified-input.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Дата": "01.06.2025",
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Тест",
+                            "SKU": "sku-1",
+                            "Название": "лимон 1 кг",
+                        }
+                    ]
+                ),
+                input_file,
+            )
+
+            result, _, _ = classify_file(input_file, root / "classified-output.csv", rules_path=rules_file)
+
+            self.assertEqual(result["Дата"].tolist(), ["01.06.2025"])
+            self.assertEqual(result["месяц"].tolist(), ["июн."])
+
     def test_merge_dataframes_filters_sales_and_deduplicates(self) -> None:
         frame = pd.DataFrame(
             [

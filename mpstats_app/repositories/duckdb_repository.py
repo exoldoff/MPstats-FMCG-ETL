@@ -438,7 +438,7 @@ def _raw_export_column_expr(column: str) -> str:
     if column in RAW_EXPORT_TIMESTAMP_COLUMNS or lower in {item.casefold() for item in RAW_EXPORT_TIMESTAMP_COLUMNS}:
         return f"TRY_CAST(NULLIF(TRIM(CAST({quoted} AS VARCHAR)), '') AS TIMESTAMP) AS {alias}"
     if column in RAW_EXPORT_DATE_COLUMNS or lower in {item.casefold() for item in RAW_EXPORT_DATE_COLUMNS} or ("дата" in lower and "время" not in lower):
-        return f"TRY_CAST(NULLIF(TRIM(CAST({quoted} AS VARCHAR)), '') AS DATE) AS {alias}"
+        return f"NULLIF(TRIM(CAST({quoted} AS VARCHAR)), '') AS {alias}"
     return quoted
 
 

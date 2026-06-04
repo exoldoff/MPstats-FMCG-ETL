@@ -49,6 +49,7 @@ class WeightParserServiceTest(unittest.TestCase):
             ]
         )
         parsed = parse_weights_dataframe(df)
+        self.assertEqual(parsed.iloc[0]["Дата"], "01.06.2025")
         self.assertAlmostEqual(parsed.iloc[0]["Вес, кг"], 0.175)
         self.assertAlmostEqual(parsed.iloc[0]["Вес, кг (сумм.)"], 0.525)
         self.assertAlmostEqual(parsed.iloc[0]["Объем, кг"], 5.25)
