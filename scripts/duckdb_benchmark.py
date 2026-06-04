@@ -1,20 +1,35 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import shutil
+import sys
 import time
 from typing import Callable
 
 import duckdb
 import pandas as pd
 
-from duckdb_mock_data import DEFAULT_SIZES, generate_mock_csv
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from duckdb_mock_data import DEFAULT_SIZES, generate_mock_csv
+except ModuleNotFoundError:
+    from scripts.duckdb_mock_data import DEFAULT_SIZES, generate_mock_csv
+from pipeline.services.merge_service import merge_csv_files_with_duckdb
 
 
 BENCH_SIZE_ORDER = ("small", "medium", "large")
+MERGE_BENCH_SIZES = {
+    "small": {"files": 3, "rows_per_file": 10_000},
+    "medium": {"files": 5, "rows_per_file": 500_000},
+    "large": {"files": 8, "rows_per_file": 500_000},
+}
 MOCK_SCHEMA = """
 {
     'period': 'VARCHAR',
@@ -47,6 +62,28 @@ class BenchResult:
     @property
     def speedup(self) -> float | None:
         if self.old_seconds is None or self.new_seconds is None or self.new_seconds <= 0:
+            return None
+        return self.old_seconds / self.new_seconds
+
+
+@dataclass(frozen=True)
+class MergeBenchResult:
+    size: str
+    input_files_count: int
+    input_rows: int
+    output_rows_old: int
+    output_rows_new: int
+    duplicates_removed_old: int
+    duplicates_removed_new: int
+    old_seconds: float
+    new_seconds: float
+    old_file_size_bytes: int
+    new_file_size_bytes: int
+    memory: str = "not_measured"
+
+    @property
+    def speedup(self) -> float | None:
+        if self.new_seconds <= 0:
             return None
         return self.old_seconds / self.new_seconds
 
@@ -94,6 +131,104 @@ def create_dim_tables(con: duckdb.DuckDBPyConnection) -> None:
                 ('sauce', 'food')
         ) AS t(category, category_group)
         """
+    )
+
+
+def generate_merge_mock_csvs(workdir: Path, *, size: str, files: int, rows_per_file: int) -> list[Path]:
+    input_dir = workdir / f"merge_{size}_{files}x{rows_per_file}"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    paths = [input_dir / f"part_{index:02d}.csv" for index in range(files)]
+    if all(path.exists() for path in paths):
+        return paths
+
+    fieldnames = ["SKU", "Продажи, шт", "Название", "Бренд", "Категория"]
+    for file_index, path in enumerate(paths):
+        with path.open("w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=";")
+            writer.writeheader()
+            for row_index in range(rows_per_file):
+                shared = row_index % 4 == 0
+                sku = f"shared-{row_index:08d}" if shared else f"file{file_index:02d}-{row_index:08d}"
+                sales: float | int
+                if row_index % 997 == 0:
+                    sales = 0
+                elif row_index % 991 == 0:
+                    sales = 50_000
+                else:
+                    sales = 1 + row_index % 1000
+                writer.writerow(
+                    {
+                        "SKU": sku,
+                        "Продажи, шт": sales,
+                        "Название": f"product {row_index:08d}",
+                        "Бренд": f"Brand {row_index % 80:02d}",
+                        "Категория": f"Category {row_index % 12:02d}",
+                    }
+                )
+    return paths
+
+
+def old_merge_csv_export(input_paths: list[Path], output_path: Path) -> dict[str, int]:
+    frames = [pd.read_csv(path, sep=";", encoding="utf-8-sig", low_memory=False) for path in input_paths]
+    input_rows = sum(len(frame) for frame in frames)
+    merged = pd.concat(frames, ignore_index=True)
+    merged["Продажи, шт"] = (
+        merged["Продажи, шт"].astype(str).str.replace(" ", "", regex=False).str.replace("\u00a0", "", regex=False).str.replace(",", ".", regex=False)
+    )
+    merged["Продажи, шт"] = pd.to_numeric(merged["Продажи, шт"], errors="coerce").fillna(0)
+    filtered = merged[(merged["Продажи, шт"] > 0) & (merged["Продажи, шт"] < 40_000)].copy()
+    deduped = filtered.drop_duplicates()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    deduped.to_csv(output_path, sep=";", index=False, encoding="utf-8-sig")
+    return {
+        "input_rows": input_rows,
+        "filtered_rows": len(filtered),
+        "output_rows": len(deduped),
+        "duplicates_removed": len(filtered) - len(deduped),
+    }
+
+
+def run_merge_benchmark(*, workdir: Path, size: str) -> MergeBenchResult:
+    config = MERGE_BENCH_SIZES[size]
+    input_paths = generate_merge_mock_csvs(
+        workdir,
+        size=size,
+        files=int(config["files"]),
+        rows_per_file=int(config["rows_per_file"]),
+    )
+    old_output = workdir / f"merge_old_{size}.csv"
+    new_output = workdir / f"merge_new_{size}.csv"
+
+    old_stats: dict[str, int] = {}
+
+    def old_merge() -> int:
+        nonlocal old_stats
+        old_stats = old_merge_csv_export(input_paths, old_output)
+        return old_stats["output_rows"]
+
+    old_seconds, _ = timed(old_merge)
+
+    new_result_holder: dict[str, object] = {}
+
+    def new_merge() -> int:
+        result = merge_csv_files_with_duckdb(input_paths, new_output)
+        new_result_holder["result"] = result
+        return result.rows_out
+
+    new_seconds, _ = timed(new_merge)
+    new_result = new_result_holder["result"]
+    return MergeBenchResult(
+        size=size,
+        input_files_count=len(input_paths),
+        input_rows=int(old_stats["input_rows"]),
+        output_rows_old=int(old_stats["output_rows"]),
+        output_rows_new=int(new_result.rows_out),
+        duplicates_removed_old=int(old_stats["duplicates_removed"]),
+        duplicates_removed_new=int(new_result.duplicates_removed),
+        old_seconds=old_seconds,
+        new_seconds=new_seconds,
+        old_file_size_bytes=file_size(old_output) or 0,
+        new_file_size_bytes=file_size(new_output) or 0,
     )
 
 
@@ -463,6 +598,48 @@ def markdown_table(results: list[BenchResult]) -> str:
     return "\n".join(lines)
 
 
+def merge_markdown_table(results: list[MergeBenchResult]) -> str:
+    lines = [
+        "| size | input files | input rows | old output rows | new output rows | old dup removed | new dup removed | before, s | after, s | speedup | old bytes | new bytes | memory |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for item in results:
+        speedup = "-" if item.speedup is None else f"{item.speedup:.2f}x"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    item.size,
+                    str(item.input_files_count),
+                    str(item.input_rows),
+                    str(item.output_rows_old),
+                    str(item.output_rows_new),
+                    str(item.duplicates_removed_old),
+                    str(item.duplicates_removed_new),
+                    f"{item.old_seconds:.4f}",
+                    f"{item.new_seconds:.4f}",
+                    speedup,
+                    str(item.old_file_size_bytes),
+                    str(item.new_file_size_bytes),
+                    item.memory,
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
+def merge_sizes_for_args(*, size: str, all_sizes: bool, include_large_merge: bool) -> list[str]:
+    if all_sizes:
+        sizes = ["small", "medium"]
+        if include_large_merge:
+            sizes.append("large")
+        return sizes
+    if size == "large" and not include_large_merge:
+        raise ValueError("Merge benchmark size=large запускается только с --include-large-merge.")
+    return [size]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark old pandas-heavy paths against DuckDB SQL paths on mock data.")
     parser.add_argument("--workdir", type=Path, default=Path("data/duckdb_benchmark"), help="Directory for generated data and benchmark outputs.")
@@ -472,6 +649,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-limit", default=None, help="DuckDB memory_limit setting, e.g. 4GB.")
     parser.add_argument("--skip-excel", action="store_true", help="Skip XLSX export benchmarks.")
     parser.add_argument("--all-sizes", action="store_true", help="Run small, medium and large sizes in one pass.")
+    parser.add_argument("--merge-only", action="store_true", help="Run only merge CSV benchmark.")
+    parser.add_argument("--include-large-merge", action="store_true", help="Allow the large merge benchmark.")
     return parser.parse_args()
 
 
@@ -499,6 +678,28 @@ def main() -> None:
     args = parse_args()
     if args.all_sizes and args.rows is not None:
         raise ValueError("--rows нельзя использовать вместе с --all-sizes.")
+    if args.merge_only:
+        if args.rows is not None:
+            raise ValueError("--rows не применяется к --merge-only; размеры merge benchmark фиксированы.")
+        sizes = merge_sizes_for_args(size=args.size, all_sizes=args.all_sizes, include_large_merge=args.include_large_merge)
+        results = [run_merge_benchmark(workdir=args.workdir, size=size) for size in sizes]
+        args.workdir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "benchmark": "merge_csv",
+            "sizes": sizes,
+            "results": [
+                {
+                    **item.__dict__,
+                    "speedup": item.speedup,
+                }
+                for item in results
+            ],
+        }
+        (args.workdir / "merge_benchmark.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        report = merge_markdown_table(results)
+        (args.workdir / "merge_benchmark.md").write_text(report + "\n", encoding="utf-8")
+        print(report)
+        return
     sizes = [size for size in BENCH_SIZE_ORDER if size in DEFAULT_SIZES] if args.all_sizes else [args.size]
     for size in sizes:
         rows = int(DEFAULT_SIZES[size] if args.all_sizes else args.rows if args.rows is not None else DEFAULT_SIZES[size])

@@ -13,6 +13,7 @@ DuckDB remains the main local analytical engine. The current production workflow
 | Idempotency | Smart pipeline has `cube_registry` skip. The old Python `__row_hash` and the new DuckDB SQL hash do not match byte-for-byte. | Anti-join by new hash is not safe for deduping already existing legacy rows. | Decision B adopted: smart import replaces the whole slice by project/period/marketplace/category inside one transaction. |
 | Transactions | Import table changes and load history insert were not consistently grouped. | Partial updates were possible if a save failed mid-flow. | Done for products import; cube registry updates remain a separate service operation. |
 | CSV export | Raw export already uses DuckDB `COPY`. Report CSV now uses direct DuckDB `COPY` for plain SQL reports. | Avoids pandas materialization for aggregated CSV files. | Done for report CSV; XLSX remains unchanged. |
+| CSV merge | Step 5 merge previously used `pandas.read_csv` for every parsed CSV, then `pd.concat(...).drop_duplicates()`. | Memory-heavy on many large parsed/classified CSV files. | Done: merge CSV via DuckDB temp tables and SQL dedup. |
 | XLSX export | openpyxl write-only mode is safe for formatted/sheet-controlled output. DuckDB Excel extension can write simple XLSX. | pandas/openpyxl should stay only on final aggregates or controlled batches. | Benchmark includes both simple DuckDB XLSX and pandas/openpyxl baseline. |
 | DB settings | Connections use default `duckdb.connect(path)`. | Fine by default, but no central place for `threads`, `memory_limit`, `temp_directory`. | Later step: managed connection helper with optional settings. |
 
@@ -76,6 +77,44 @@ DB impact:
 - No import/smart pipeline SQL was changed.
 - No XLSX export path was changed.
 
+### Step 4: merge CSV via DuckDB
+
+Current merge path audit:
+
+- File: `pipeline/services/merge_service.py`.
+- Callers:
+  - CLI pipeline step 5: `pipeline/services/run_service.py`;
+  - local web-app process action: `mpstats_app/services/workflow_service.py`.
+- Inputs: semicolon CSV files from `PipelinePaths.step4_parsed_dir` (`04_step4_parsed`).
+- Output: merged semicolon CSV at `PipelinePaths.merged_csv`, used by `classification_service.classify_file`.
+- Old path:
+  - `read_semicolon_csv(...)` for each file;
+  - `pd.concat(frames, ignore_index=True)`;
+  - column aliases: `Продажи` -> `Продажи, шт`, `Средняя цена` -> `Средняя цена, руб`, `Выручка` -> `Выручка, руб` when target column is absent;
+  - sales normalization through string cleanup and `pd.to_numeric(...).fillna(0)`;
+  - sales filter: `Продажи, шт > min_sales` and `< max_sales`;
+  - `drop_duplicates()` by all normalized columns, `keep='first'`;
+  - `to_csv(..., sep=';', encoding='utf-8-sig')`.
+- Old order semantics: first file order, then row order inside each file; duplicates keep the first occurrence.
+
+Implemented DuckDB path:
+
+- Added `merge_csv_files_with_duckdb(...) -> MergeResult`.
+- CSV bodies are read through DuckDB `read_csv(..., all_varchar=true, parallel=false)`, not pandas.
+- Each file scan adds `__source_file_index` and `__source_row_number`.
+- Dedup uses `ROW_NUMBER() OVER (PARTITION BY <dedup columns> ORDER BY __source_file_index, __source_row_number)`.
+- Default dedup columns are all normalized output columns, matching old `drop_duplicates()`.
+- Output order is `ORDER BY __source_file_index, __source_row_number`, matching old `keep='first'` order.
+- Output is written by DuckDB `COPY ... TO CSV` with delimiter `;`, header and `utf-8-sig` BOM.
+- `merge_directory` now returns `MergeResult` instead of a full merged DataFrame, so the web process action reads row count from `MergeResult.rows_out` and does not materialize the merged output in memory.
+
+DB impact:
+
+- No new persistent DuckDB tables were added.
+- The helper uses in-memory DuckDB temp tables only.
+- Import/smart pipeline DB import functions were not changed.
+- XLSX and report CSV exports were not changed in this step.
+
 ## Benchmark stand
 
 Artifacts:
@@ -109,6 +148,8 @@ python3 scripts/duckdb_benchmark.py --size small
 python3 scripts/duckdb_benchmark.py --size medium --threads 4 --memory-limit 4GB
 python3 scripts/duckdb_benchmark.py --size large --threads 4 --memory-limit 6GB --skip-excel
 python3 scripts/duckdb_benchmark.py --all-sizes --skip-excel
+python3 scripts/duckdb_benchmark.py --merge-only --all-sizes
+python3 scripts/duckdb_benchmark.py --merge-only --size large --include-large-merge
 ```
 
 Outputs are written to `data/duckdb_benchmark/`:
@@ -160,6 +201,55 @@ Pandas/openpyxl should remain for cases that need:
 - small preview data that must be converted to JSON rows.
 
 Current report CSV does not need these features, so it is a type A export and now goes through direct `COPY`.
+
+### Step 4 merge CSV results
+
+Step 4 local run:
+
+- `python3 scripts/duckdb_benchmark.py --merge-only --all-sizes --workdir data/duckdb_merge_benchmark_step4`
+
+Large merge benchmark:
+
+- Not run by default.
+- `--merge-only --all-sizes` runs only `small` and `medium`.
+- `large` requires `--include-large-merge`.
+
+Memory:
+
+- Per-operation memory was not measured. The project still has no lightweight RSS/heap helper, and this step avoids adding a profiler.
+
+The merge benchmark compares:
+
+- old path: pandas `read_csv` for every file -> `pd.concat` -> sales filter -> `drop_duplicates` -> `to_csv`;
+- new path: DuckDB `read_csv` scans -> temp table -> SQL sales filter -> SQL window dedup -> `COPY TO CSV`.
+
+| size | input files | input rows | old output rows | new output rows | old dup removed | new dup removed | old duration, s | new duration, s | speedup | old file bytes | new file bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| small | 3 | 30,000 | 24,947 | 24,947 | 4,990 | 4,990 | 0.1070 | 0.0777 | 1.38x | 1,444,353 | 1,494,247 |
+| medium | 5 | 2,500,000 | 1,995,978 | 1,995,978 | 498,992 | 498,992 | 8.2827 | 2.1138 | 3.92x | 115,555,637 | 119,547,593 |
+
+Notes:
+
+- Output row counts match old/new.
+- Duplicate removal counts match old/new.
+- File sizes differ because DuckDB and pandas serialize numeric values differently, but downstream CSV reads get equivalent columns and values.
+- Small datasets can still be dominated by DuckDB startup/query overhead; the value of Step 4 is avoiding pandas materialization on large multi-file merges.
+
+### DuckDB merge limitations
+
+DuckDB merge is used for the standard semicolon CSV step 5 path.
+
+Pandas merge helpers are left in place for:
+
+- small direct unit tests of `merge_dataframes`;
+- ad hoc legacy callers that already pass DataFrames;
+- future nonstandard cases where Python post-processing is explicitly required.
+
+Known constraints:
+
+- The optimized path expects a normal header row and semicolon CSV dialect.
+- `utf-8-sig` input is scanned as UTF-8 by DuckDB; the output still includes the BOM.
+- Exact byte-for-byte CSV equality with pandas is not guaranteed for numeric formatting, but schema, order, row count and dedup semantics are preserved.
 
 Earlier Step 1/2 local runs:
 
@@ -227,8 +317,9 @@ Current verification focus:
 1. Keep web import on DuckDB SQL staging.
 2. Keep idempotency as slice replacement for smart pipeline imports.
 3. Keep raw CSV export on DuckDB `COPY`.
-4. Keep Excel export and import/smart pipeline unchanged in Step 3.
+4. Keep Excel export and import/smart pipeline unchanged in Step 4.
 5. Use direct DuckDB `COPY` for plain report CSV exports.
+6. Use DuckDB temp-table merge for standard step 5 parsed CSV merging.
 
 Verification smoke:
 
@@ -239,3 +330,4 @@ Verification smoke:
 - Raw CSV export job succeeds and creates a file.
 - Raw XLSX export succeeds and creates a file.
 - Report CSV export succeeds and does not call pandas `fetchdf()` for the final file.
+- Step 5 merge CSV succeeds and does not call pandas `concat()` for the directory merge path.

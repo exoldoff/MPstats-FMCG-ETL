@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -15,8 +16,9 @@ from pipeline.services.enrich_service import (
     extract_first_date_from_filename,
     extract_marketplace_from_filename,
 )
-from pipeline.services.merge_service import merge_dataframes
+from pipeline.services.merge_service import merge_csv_files_with_duckdb, merge_dataframes, merge_directory
 from pipeline.services.run_service import parse_steps
+from scripts.duckdb_benchmark import merge_sizes_for_args
 
 
 class PipelineServicesTest(unittest.TestCase):
@@ -45,6 +47,112 @@ class PipelineServicesTest(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged.iloc[0]["SKU"], "a")
         self.assertIn("Продажи, шт", merged.columns)
+
+    def test_duckdb_merge_matches_pandas_merge_and_preserves_first_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            file_a = input_dir / "a.csv"
+            file_b = input_dir / "b.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"SKU": "a", "Продажи": "10", "Название": "one"},
+                        {"SKU": "a", "Продажи": "10", "Название": "one"},
+                        {"SKU": "b", "Продажи": "0", "Название": "two"},
+                        {"SKU": "c", "Продажи": "50000", "Название": "three"},
+                    ]
+                ),
+                file_a,
+            )
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"SKU": "d", "Продажи": "11", "Название": "four"},
+                        {"SKU": "a", "Продажи": "10", "Название": "one"},
+                        {"SKU": "e", "Продажи": "12", "Название": "five"},
+                    ]
+                ),
+                file_b,
+            )
+
+            old_frame = merge_dataframes([read_semicolon_csv(file_a), read_semicolon_csv(file_b)], min_sales=0, max_sales=40_000)
+            old_output = root / "old.csv"
+            write_semicolon_csv(old_frame, old_output)
+            new_output = root / "new.csv"
+
+            result = merge_csv_files_with_duckdb([file_a, file_b], new_output, min_sales=0, max_sales=40_000)
+
+            self.assertTrue(new_output.exists())
+            self.assertGreater(new_output.stat().st_size, 0)
+            self.assertTrue(new_output.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertEqual(new_output.read_text(encoding="utf-8-sig").splitlines()[0], "SKU;Продажи, шт;Название")
+            self.assertEqual(result.rows_in, 7)
+            self.assertEqual(result.filtered_rows, 5)
+            self.assertEqual(result.rows_out, 3)
+            self.assertEqual(result.duplicates_removed, 2)
+            self.assertEqual(result.input_files_count, 2)
+
+            old_saved = read_semicolon_csv(old_output)
+            new_saved = read_semicolon_csv(new_output)
+            self.assertEqual(list(new_saved.columns), list(old_saved.columns))
+            self.assertEqual(new_saved["SKU"].tolist(), ["a", "d", "e"])
+            pd.testing.assert_frame_equal(old_saved, new_saved, check_dtype=False)
+
+    def test_merge_directory_uses_duckdb_without_pandas_concat(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            write_semicolon_csv(pd.DataFrame([{"SKU": "a", "Продажи, шт": 1, "Название": "one"}]), input_dir / "a.csv")
+            output_file = root / "merged.csv"
+
+            with patch("pipeline.services.merge_service.pd.concat", side_effect=AssertionError("merge_directory must not use pandas concat")):
+                merged, step = merge_directory(input_dir, output_file)
+
+            self.assertTrue(output_file.exists())
+            self.assertEqual(step.ok, 1)
+            self.assertEqual(step.rows, 1)
+            self.assertEqual(merged.rows_out, 1)
+            saved = read_semicolon_csv(output_file)
+            self.assertEqual(saved["SKU"].tolist(), ["a"])
+
+    def test_duckdb_merge_subset_dedup_keeps_first_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            file_path = root / "input.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"SKU": "a", "Продажи, шт": 10, "Название": "first"},
+                        {"SKU": "a", "Продажи, шт": 11, "Название": "second"},
+                        {"SKU": "b", "Продажи, шт": 12, "Название": "third"},
+                    ]
+                ),
+                file_path,
+            )
+            output_file = root / "out.csv"
+
+            result = merge_csv_files_with_duckdb([file_path], output_file, dedup_columns=["SKU"])
+
+            self.assertEqual(result.rows_out, 2)
+            self.assertEqual(result.duplicates_removed, 1)
+            saved = read_semicolon_csv(output_file)
+            self.assertEqual(saved["SKU"].tolist(), ["a", "b"])
+            self.assertEqual(saved["Название"].tolist(), ["first", "third"])
+
+    def test_merge_benchmark_large_requires_explicit_flag(self) -> None:
+        self.assertEqual(
+            merge_sizes_for_args(size="small", all_sizes=True, include_large_merge=False),
+            ["small", "medium"],
+        )
+        self.assertEqual(
+            merge_sizes_for_args(size="small", all_sizes=True, include_large_merge=True),
+            ["small", "medium", "large"],
+        )
+        with self.assertRaises(ValueError):
+            merge_sizes_for_args(size="large", all_sizes=False, include_large_merge=False)
 
     def test_classify_file_applies_rules_and_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

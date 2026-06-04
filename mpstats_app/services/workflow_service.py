@@ -159,7 +159,7 @@ class WorkflowService:
                 "run_id": run_id,
                 "status": "succeeded",
                 "output_file": str(paths.merged_csv),
-                "rows": len(merged),
+                "rows": merged.rows_out,
                 "preview": self.preview_file(paths.merged_csv),
                 "results": [self._result_dict(item) for item in results],
             }
