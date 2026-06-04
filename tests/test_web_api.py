@@ -1071,8 +1071,8 @@ class WebApiTest(unittest.TestCase):
             self.assertEqual(row["Маркетплейс"], "Ozon")
             self.assertEqual(row["Категория"], "Лимонная кислота")
             self.assertEqual(row["Бренд"], "Brand A")
-            self.assertEqual(float(row["Продажи, шт"]), 8.0)
-            self.assertEqual(float(row["Выручка, руб"]), 80.0)
+            self.assertEqual(float(row["Продажи, шт"].replace(",", ".")), 8.0)
+            self.assertEqual(float(row["Выручка, руб"].replace(",", ".")), 80.0)
             self.assertNotIn("Мыло", csv_text)
             self.assertNotIn("2025-02", csv_text)
 
@@ -1112,6 +1112,84 @@ class WebApiTest(unittest.TestCase):
                 with self.assertRaises(Exception):
                     repository.export_query_to_csv("SELECT missing_column FROM missing_table", root / "broken.csv")
             self.assertTrue(any("DuckDB COPY CSV export failed" in message for message in logs.output))
+
+    def test_flat_csv_decimal_comma_preserves_protected_columns_and_xlsx_types(self) -> None:
+        query = """
+            SELECT
+                '2025.01.02' AS " ДАТА ",
+                'ABC.123' AS " Sku ",
+                'seller.ru' AS "продавец",
+                'cat.1' AS "категория",
+                'Brand.1' AS "бренд",
+                '2025.1' AS "год",
+                '01.1' AS "месяц",
+                'sub.1' AS "подкатегория",
+                'type.1' AS "тип",
+                sales AS "Продажи",
+                price AS "Цена",
+                revenue AS "Выручка",
+                volume AS "Объем",
+                new_metric AS "Новая метрика",
+                site AS "Сайт",
+                code AS "Артикул"
+            FROM (
+                VALUES
+                    (1, true, 123.45, 0.5, CAST(1000.00 AS DECIMAL(10, 2)), CAST(NULL AS DOUBLE), 7.25, 'site.ru', 'A.B'),
+                    (2, false, 999.9, 9.9, CAST(9.90 AS DECIMAL(10, 2)), 9.9, 9.9, 'skip.ru', 'Z.Z')
+            ) AS rows(row_id, include_row, sales, price, revenue, volume, new_metric, site, code)
+            WHERE include_row
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            csv_target = root / "flat" / "decimal-comma.csv"
+            csv_result = repository.export_query_to_csv(query, csv_target)
+            self.assertEqual(csv_result.status, "success")
+            self.assertEqual(csv_result.row_count, 1)
+            self.assertTrue(csv_target.read_bytes().startswith(b"\xef\xbb\xbf"))
+            csv_text = csv_target.read_text(encoding="utf-8-sig")
+            self.assertNotIn("skip.ru", csv_text)
+            rows = list(csv.DictReader(StringIO(csv_text), delimiter=";"))
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+
+            self.assertEqual(row[" ДАТА "], "2025.01.02")
+            self.assertEqual(row[" Sku "], "ABC.123")
+            self.assertEqual(row["продавец"], "seller.ru")
+            self.assertEqual(row["категория"], "cat.1")
+            self.assertEqual(row["бренд"], "Brand.1")
+            self.assertEqual(row["год"], "2025.1")
+            self.assertEqual(row["месяц"], "01.1")
+            self.assertEqual(row["подкатегория"], "sub.1")
+            self.assertEqual(row["тип"], "type.1")
+            self.assertEqual(row["Продажи"], "123,45")
+            self.assertEqual(row["Цена"], "0,5")
+            self.assertNotIn(".", row["Выручка"])
+            self.assertTrue(row["Выручка"].startswith("1000,"))
+            self.assertEqual(row["Объем"], "")
+            self.assertEqual(row["Новая метрика"], "7,25")
+            self.assertEqual(row["Сайт"], "site.ru")
+            self.assertEqual(row["Артикул"], "A.B")
+
+            xlsx_target = root / "flat" / "decimal-comma.xlsx"
+            xlsx_result = repository.export_query_to_xlsx(query, xlsx_target)
+            self.assertEqual(xlsx_result.status, "success")
+            self.assertEqual(xlsx_result.row_count, 1)
+
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(xlsx_target, read_only=False)
+            worksheet = workbook.active
+            headers = [cell.value for cell in worksheet[1]]
+            sales_column = headers.index("Продажи") + 1
+            price_column = headers.index("Цена") + 1
+            self.assertIsInstance(worksheet.cell(row=2, column=sales_column).value, (int, float))
+            self.assertIsInstance(worksheet.cell(row=2, column=price_column).value, (int, float))
+            self.assertEqual(worksheet.cell(row=2, column=sales_column).value, 123.45)
 
     def test_flat_xlsx_helper_uses_duckdb_copy_and_preserves_types(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

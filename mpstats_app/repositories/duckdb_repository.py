@@ -52,6 +52,17 @@ REPORT_VOLUME_KG_COLUMNS = ("Объем, кг", "Объём, кг", "volume_kg")
 REPORT_VOLUME_T_COLUMNS = ("Объем, т", "Объём, т", "volume_t")
 REPORT_CLASSIFICATION_COLUMNS = ("Тип", "Подкатегория", "Вид", "Вид мяса", "Сегмент")
 XLSX_MAX_DATA_ROWS_WITH_HEADER = 1_048_575
+CSV_DECIMAL_COMMA_PROTECTED_COLUMNS = {
+    "дата",
+    "sku",
+    "продавец",
+    "категория",
+    "бренд",
+    "год",
+    "месяц",
+    "подкатегория",
+    "тип",
+}
 RAW_EXPORT_DOUBLE_COLUMNS = (
     "Продажи, шт",
     "Продажи",
@@ -328,6 +339,27 @@ def _clean_copy_query(query: str) -> str:
     if not cleaned:
         raise ValueError("SQL-запрос для CSV-экспорта пуст.")
     return cleaned
+
+
+def _csv_decimal_column_key(column: str) -> str:
+    return str(column).strip().casefold()
+
+
+def _csv_decimal_comma_expr(column: str) -> str:
+    quoted = quote_duckdb_name(column)
+    if _csv_decimal_column_key(column) in CSV_DECIMAL_COMMA_PROTECTED_COLUMNS:
+        return f"{quoted} AS {quoted}"
+    return (
+        "CASE "
+        f"WHEN {quoted} IS NULL THEN NULL "
+        f"ELSE regexp_replace(CAST({quoted} AS VARCHAR), {sql_literal(r'([0-9])\.([0-9])')}, {sql_literal(r'\1,\2')}, 'g') "
+        f"END AS {quoted}"
+    )
+
+
+def _csv_decimal_comma_query(query: str, columns: list[str]) -> str:
+    select_sql = ", ".join(_csv_decimal_comma_expr(column) for column in columns)
+    return f"SELECT {select_sql} FROM ({query}) AS csv_decimal_source"
 
 
 def _copy_row_count(rows: list[Any]) -> int | None:
@@ -2069,12 +2101,16 @@ class DuckDbAppRepository:
         delimiter: str = ";",
         header: bool = True,
         sheet_name: str = "Data",
+        csv_decimal_separator: Literal["dot", "comma"] = "comma",
     ) -> ExportResult:
         target = Path(output_path).expanduser()
         target.parent.mkdir(parents=True, exist_ok=True)
         clean_format = str(format).lower()
         if clean_format not in {"csv", "xlsx"}:
             raise ValueError("Формат flat export должен быть csv или xlsx.")
+        clean_csv_decimal_separator = str(csv_decimal_separator).lower()
+        if clean_csv_decimal_separator not in {"dot", "comma"}:
+            raise ValueError("CSV decimal separator должен быть dot или comma.")
         clean_query = _clean_copy_query(query)
         clean_delimiter = _validate_csv_delimiter(delimiter)
         clean_sheet_name = _validate_sheet_name(sheet_name)
@@ -2090,9 +2126,15 @@ class DuckDbAppRepository:
             ) as metrics:
                 with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
                     if clean_format == "csv":
-                        if header:
+                        csv_query = clean_query
+                        columns: list[str] | None = None
+                        if header or clean_csv_decimal_separator == "comma":
                             metadata = con.execute(f"SELECT * FROM ({clean_query}) AS export_source LIMIT 0", execute_params)
                             columns = [str(item[0]) for item in (metadata.description or [])]
+                        if clean_csv_decimal_separator == "comma":
+                            csv_query = _csv_decimal_comma_query(clean_query, columns or [])
+                        if header:
+                            columns = columns or []
                             header_prefix = _csv_header_prefix(columns, delimiter=clean_delimiter)
                             options = (
                                 f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, "
@@ -2101,7 +2143,7 @@ class DuckDbAppRepository:
                         else:
                             options = f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false)"
                         rows = con.execute(
-                            f"COPY ({clean_query}) TO {sql_literal(str(target))} {options}",
+                            f"COPY ({csv_query}) TO {sql_literal(str(target))} {options}",
                             execute_params,
                         ).fetchall()
                         row_count = _copy_row_count(rows)

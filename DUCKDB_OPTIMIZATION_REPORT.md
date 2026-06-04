@@ -282,6 +282,17 @@ Type casting policy for Excel pivots:
 - Report query already emits numeric aggregates (`SUM`, `COUNT`, arithmetic metrics) and year/month integers.
 - CSV and XLSX raw exports use the same typed SELECT, so row sets match across formats.
 
+### Step 7: CSV decimal comma formatting
+
+- Flat CSV export now applies decimal comma formatting inside the export SQL query before DuckDB `COPY` writes the file.
+- XLSX export is not wrapped and keeps DuckDB/openpyxl numeric cells as numbers.
+- CSV delimiter remains `;`.
+- Header and `utf-8-sig` BOM behavior are preserved through the existing `PREFIX` strategy.
+- Protected dimension/text columns are not formatted: `ДАТА`, `SKU`, `продавец`, `категория`, `бренд`, `год`, `месяц`, `подкатегория`, `тип`. Column-name matching is case-insensitive and trims surrounding spaces.
+- Non-protected columns are cast to `VARCHAR` only for CSV output and use `regexp_replace(..., '([0-9])\.([0-9])', '\1,\2', 'g')`, so decimal points between digits become commas without running a blind replace over the finished CSV file.
+- Power Query in Russian locale no longer needs manual replacement of `.` with `,` for flat CSV exports.
+- Filters, sorting, selected columns and row-count semantics stay on the original query; the formatting wrapper is applied after the source query result.
+
 DB impact:
 
 - No schema changes.
