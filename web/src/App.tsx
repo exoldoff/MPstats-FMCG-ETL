@@ -142,6 +142,11 @@ type CubeMatrixCell = { status: "ready" | "missing"; period: string; rowsCount: 
 type CubeMatrixRow = { categoryKey: string; categoryName: string; cells: CubeMatrixCell[]; missingCount: number };
 type CubeMatrix = { marketplaces: string[]; rows: CubeMatrixRow[]; missingCount: number; totalCells: number; targetPeriods: Record<string, string> };
 type PipelineOperationKind = "start" | "pause" | "stop" | "resume" | "retry" | "rebuild" | "reclassify" | "sync";
+type EditableWorkspace = "catalog" | "classifier";
+type UnsavedChangesPrompt = {
+  kind: EditableWorkspace;
+  proceed: () => void | Promise<void>;
+};
 type PipelineOperation = {
   kind: PipelineOperationKind;
   label: string;
@@ -152,6 +157,15 @@ type PipelineOperation = {
 };
 
 const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (сумм.)", "Подкатегория", "Тип", "Вид мяса"];
+
+function editorSnapshot<T>(value: T): string {
+  return JSON.stringify(value);
+}
+
+function restoreSnapshot<T>(snapshot: string | null): T | null {
+  if (!snapshot) return null;
+  return JSON.parse(snapshot) as T;
+}
 
 const statusLabels: Record<string, string> = {
   raw: "raw",
@@ -448,11 +462,13 @@ export function App() {
   const [catalogPath, setCatalogPath] = useState("");
   const [catalogQuery, setCatalogQuery] = useState("");
   const [selectedCatalogId, setSelectedCatalogId] = useState<string | null>(null);
+  const [savedCatalogSnapshot, setSavedCatalogSnapshot] = useState<string | null>(null);
   const [pipelineSettings, setPipelineSettings] = useState<PipelineSettings>(defaultPipelineSettings);
   const [classifierRules, setClassifierRules] = useState<ClassifierRule[]>([]);
   const [rulesPath, setRulesPath] = useState("");
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   const [classifierQuery, setClassifierQuery] = useState("");
+  const [savedClassifierSnapshot, setSavedClassifierSnapshot] = useState<string | null>(null);
   const [externalClassifierFile, setExternalClassifierFile] = useState<File | null>(null);
   const [externalClassifierWriteXlsx, setExternalClassifierWriteXlsx] = useState(false);
   const [externalClassifierResult, setExternalClassifierResult] = useState<ClassificationResponse | null>(null);
@@ -504,6 +520,7 @@ export function App() {
   const [reportArtifacts, setReportArtifacts] = useState<ReportArtifact[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [pipelineOperation, setPipelineOperation] = useState<PipelineOperation | null>(null);
+  const [unsavedChangesPrompt, setUnsavedChangesPrompt] = useState<UnsavedChangesPrompt | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [instructionOpen, setInstructionOpen] = useState(false);
@@ -625,6 +642,7 @@ export function App() {
     if (rulesResult.status === "fulfilled") {
       setRulesPath(rulesResult.value.path);
       setClassifierRules(rulesResult.value.rules);
+      setSavedClassifierSnapshot(editorSnapshot(rulesResult.value.rules));
       setSelectedRuleId((prev) => (prev && rulesResult.value.rules.some((rule) => rule.id === prev) ? prev : null));
     } else {
       addLoadError(loadErrors, "Правила классификатора", rulesResult.reason);
@@ -1117,6 +1135,7 @@ export function App() {
       const response = await api.getCategorySource();
       setCatalogPath(response.path);
       setCatalogRows(response.rows);
+      setSavedCatalogSnapshot(editorSnapshot(response.rows));
       setSelectedCatalogId((prev) => prev ?? response.rows[0]?.id ?? null);
     } catch (exc) {
       setError(`Справочник категорий: ${errorText(exc)}`);
@@ -1127,6 +1146,7 @@ export function App() {
     const response = await api.saveCategorySource(catalogRows);
     setCatalogPath(response.path);
     setCatalogRows(response.rows);
+    setSavedCatalogSnapshot(editorSnapshot(response.rows));
     setSelectedCatalogId(response.rows[0]?.id ?? null);
     const categoryResponse = await api.listCategories();
     setCategories(categoryResponse.categories);
@@ -1220,6 +1240,90 @@ export function App() {
     });
   }, [classifierRules, classifierQuery]);
   const selectedRule = useMemo(() => classifierRules.find((rule) => rule.id === selectedRuleId) ?? null, [classifierRules, selectedRuleId]);
+  const catalogDirty = useMemo(
+    () => savedCatalogSnapshot !== null && editorSnapshot(catalogRows) !== savedCatalogSnapshot,
+    [catalogRows, savedCatalogSnapshot]
+  );
+  const classifierDirty = useMemo(
+    () => savedClassifierSnapshot !== null && editorSnapshot(classifierRules) !== savedClassifierSnapshot,
+    [classifierRules, savedClassifierSnapshot]
+  );
+
+  useEffect(() => {
+    if (!catalogDirty && !classifierDirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [catalogDirty, classifierDirty]);
+
+  function dirtyWorkspaceForCurrentTab(): EditableWorkspace | null {
+    if (tab === "catalog" && catalogDirty) return "catalog";
+    if (tab === "classifier" && classifierDirty) return "classifier";
+    return null;
+  }
+
+  function guardUnsavedChanges(proceed: () => void | Promise<void>, forcedKind?: EditableWorkspace | null) {
+    const kind = forcedKind ?? dirtyWorkspaceForCurrentTab();
+    if (!kind) {
+      void proceed();
+      return;
+    }
+    setUnsavedChangesPrompt({ kind, proceed });
+  }
+
+  function changeTab(nextTab: Tab, afterChange?: () => void | Promise<void>) {
+    const proceed = async () => {
+      setTab(nextTab);
+      await afterChange?.();
+    };
+    const kind = nextTab === tab && !afterChange ? null : dirtyWorkspaceForCurrentTab();
+    guardUnsavedChanges(proceed, kind);
+  }
+
+  function discardEditorChanges(kind: EditableWorkspace) {
+    if (kind === "catalog") {
+      const rows = restoreSnapshot<CategorySourceRow[]>(savedCatalogSnapshot);
+      if (!rows) return;
+      setCatalogRows(rows);
+      setSelectedCatalogId((prev) => (prev && rows.some((row) => row.id === prev) ? prev : rows[0]?.id ?? null));
+      return;
+    }
+    const rules = restoreSnapshot<ClassifierRule[]>(savedClassifierSnapshot);
+    if (!rules) return;
+    setClassifierRules(rules);
+    setSelectedRuleId((prev) => (prev && rules.some((rule) => rule.id === prev) ? prev : null));
+  }
+
+  async function saveDirtyWorkspace(kind: EditableWorkspace): Promise<boolean> {
+    if (kind === "catalog") {
+      return Boolean(await runAction("Сохранение справочника", saveCategorySource));
+    }
+    return saveClassifierRules();
+  }
+
+  async function saveCategorySourceFromEditor() {
+    return Boolean(await runAction("Сохранение справочника", saveCategorySource));
+  }
+
+  async function confirmUnsavedSave() {
+    const prompt = unsavedChangesPrompt;
+    if (!prompt) return;
+    const saved = await saveDirtyWorkspace(prompt.kind);
+    if (!saved) return;
+    setUnsavedChangesPrompt(null);
+    await prompt.proceed();
+  }
+
+  async function confirmUnsavedDiscard() {
+    const prompt = unsavedChangesPrompt;
+    if (!prompt) return;
+    discardEditorChanges(prompt.kind);
+    setUnsavedChangesPrompt(null);
+    await prompt.proceed();
+  }
   const filteredProjects = useMemo(() => {
     const text = projectQuery.trim().toLowerCase();
     if (!text) return projects;
@@ -1448,13 +1552,15 @@ export function App() {
     setSelectedRuleId((prev) => (prev === id ? null : prev));
   }
 
-  async function saveClassifierRules() {
+  async function saveClassifierRules(): Promise<boolean> {
     const selectedIndex = classifierRules.findIndex((rule) => rule.id === selectedRuleId);
-    await runAction("Сохранение правил классификатора", () => api.saveClassifierRules(classifierRules), (response) => {
+    const response = await runAction("Сохранение правил классификатора", () => api.saveClassifierRules(classifierRules), (response) => {
       setRulesPath(response.path);
       setClassifierRules(response.rules);
+      setSavedClassifierSnapshot(editorSnapshot(response.rules));
       setSelectedRuleId(selectedIndex >= 0 ? response.rules[selectedIndex]?.id ?? null : null);
     });
+    return Boolean(response);
   }
 
   async function classifyExternalFile() {
@@ -1611,8 +1717,17 @@ export function App() {
           operation={pipelineOperation}
           run={operationRun}
           onClose={() => setPipelineOperation(null)}
-          onOpenPlan={() => setTab("plan")}
-          onOpenCube={() => setTab("cube")}
+          onOpenPlan={() => changeTab("plan")}
+          onOpenCube={() => changeTab("cube")}
+        />
+      ) : null}
+      {unsavedChangesPrompt ? (
+        <UnsavedChangesModal
+          kind={unsavedChangesPrompt.kind}
+          busy={Boolean(busy)}
+          onSave={() => void confirmUnsavedSave()}
+          onDiscard={() => void confirmUnsavedDiscard()}
+          onCancel={() => setUnsavedChangesPrompt(null)}
         />
       ) : null}
 
@@ -1724,15 +1839,15 @@ export function App() {
           <section className="panel">
             <SectionTitle icon={<FileSpreadsheet />} title="Правила и справочник" hint="Редактирование вынесено в центральные вкладки, чтобы не работать с сырым CSV или JSON." />
             <div className="mini-actions">
-              <button className="ghost-button" title="Открывает полноценный редактор правил классификатора." onClick={() => setTab("classifier")}>
+              <button className="ghost-button" title="Открывает полноценный редактор правил классификатора." onClick={() => changeTab("classifier")}>
                 <FileSpreadsheet size={17} />
                 Правила
               </button>
-	              <button className="ghost-button" title="Открывает CSV-справочник категорий и путей." onClick={() => { setTab("catalog"); void loadCategorySource(); }}>
+	              <button className="ghost-button" title="Открывает CSV-справочник категорий и путей." onClick={() => changeTab("catalog", loadCategorySource)}>
 	                <FolderSync size={17} />
 	                Справочник
 	              </button>
-	              <button className="ghost-button" title="Показать сохранённые проекты, кубы, файлы и удаления." onClick={() => { setTab("projects"); void loadProjects(); }}>
+	              <button className="ghost-button" title="Показать сохранённые проекты, кубы, файлы и удаления." onClick={() => changeTab("projects", loadProjects)}>
 	                <Archive size={17} />
 	                Проекты
 	              </button>
@@ -1744,19 +1859,18 @@ export function App() {
 
         <section className="center-stage">
           <nav className="tabs main-tabs" aria-label="Основные разделы">
-            <button className={tab === "projects" ? "active" : ""} title="Список проектов, выбор и удаление." onClick={() => { setTab("projects"); void loadProjects(); }}>Проекты</button>
-            <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Умный план</button>
-            <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => setTab("categories")}>Категории</button>
-            <button className={isDataTab(tab) ? "active" : ""} title="Куб, отчёты, файлы, выгрузка и проверка качества." onClick={() => setTab("cube")}>Данные</button>
-            <button className={tab === "classifier" ? "active" : ""} title="Правила классификатора без ручного JSON." onClick={() => setTab("classifier")}>Классификатор</button>
+            <button className={tab === "projects" ? "active" : ""} title="Список проектов, выбор и удаление." onClick={() => changeTab("projects", loadProjects)}>Проекты</button>
+            <button className={tab === "plan" ? "active" : ""} onClick={() => changeTab("plan")}>Умный план</button>
+            <button className={tab === "categories" ? "active" : ""} title="Выбор активных путей для исторической загрузки." onClick={() => changeTab("categories")}>Категории</button>
+            <button className={isDataTab(tab) ? "active" : ""} title="Куб, отчёты, файлы, выгрузка и проверка качества." onClick={() => changeTab("cube")}>Данные</button>
+            <button className={tab === "classifier" ? "active" : ""} title="Правила классификатора без ручного JSON." onClick={() => changeTab("classifier")}>Классификатор</button>
           </nav>
 
           {isDataTab(tab) ? (
             <DataSubnav
               activeTab={tab}
               onSelect={(nextTab) => {
-                setTab(nextTab);
-                if (nextTab === "files") void refreshFilesAndCube();
+                changeTab(nextTab, nextTab === "files" ? refreshFilesAndCube : undefined);
               }}
             />
           ) : null}
@@ -1825,9 +1939,10 @@ export function App() {
               onSelect={setSelectedCatalogId}
               onAdd={addCatalogRow}
               onDelete={deleteCatalogRow}
-              onReload={loadCategorySource}
-              onSave={() => void runAction("Сохранение справочника", saveCategorySource)}
+              onReload={() => guardUnsavedChanges(loadCategorySource, catalogDirty ? "catalog" : null)}
+              onSave={() => void saveCategorySourceFromEditor()}
               onChange={updateCatalogRow}
+              dirty={catalogDirty}
             />
           ) : null}
 
@@ -2115,6 +2230,7 @@ export function App() {
               }}
               onExternalWriteXlsxChange={setExternalClassifierWriteXlsx}
               onExternalClassify={() => void runAction("Классификация внешнего файла", classifyExternalFile, setExternalClassifierResult)}
+              dirty={classifierDirty}
             />
           ) : null}
         </section>
@@ -2208,7 +2324,7 @@ export function App() {
             <div className="run-list">
               {runs.map((item) => (
                 <div key={item.id} className={`run-row ${run?.id === item.id ? "active" : ""}`}>
-                  <button className="run-select-button" onClick={() => { setRun(item); setTab("plan"); void refreshRun(item.id); }}>
+                  <button className="run-select-button" onClick={() => guardUnsavedChanges(() => { setRun(item); setTab("plan"); void refreshRun(item.id); })}>
                     <span><strong>{runTypeLabel(item.run_type)}</strong><small>{item.period_from} - {item.period_to}</small></span>
                     <Badge value={item.status} />
                   </button>
@@ -3425,6 +3541,7 @@ function CategorySourceEditor(props: {
   selectedRow: CategorySourceRow | null;
   sourcePath: string;
   query: string;
+  dirty: boolean;
   onQueryChange: (value: string) => void;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -3436,7 +3553,7 @@ function CategorySourceEditor(props: {
   const row = props.selectedRow;
   return (
     <section className="panel stage-panel">
-      <SectionTitle icon={<FolderSync />} title="Справочник категорий" meta={`${props.rows.length} строк`} hint="Это единственный источник категорий: CSV в корне проекта. Excel больше не читается, чтобы не ловить дубли путей." />
+      <SectionTitle icon={<FolderSync />} title="Справочник категорий" meta={props.dirty ? `${props.rows.length} строк · не сохранено` : `${props.rows.length} строк`} hint="Это единственный источник категорий: CSV в корне проекта. Excel больше не читается, чтобы не ловить дубли путей." />
       <div className="toolbar wrap">
         <label className="search-field">
           <Search size={17} />
@@ -3592,6 +3709,7 @@ function ClassifierRulesEditor(props: {
   selectedRule: ClassifierRule | null;
   rulesPath: string;
   query: string;
+  dirty: boolean;
   onQueryChange: (value: string) => void;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -3614,7 +3732,7 @@ function ClassifierRulesEditor(props: {
   const rule = props.selectedRule;
   return (
     <section className="panel stage-panel">
-      <SectionTitle icon={<FileSpreadsheet />} title="Классификатор" meta={`${props.rules.length}/${props.totalRules} правил`} hint="Правила сохраняются в classifiers/rules.csv. JSON дополнительных условий собирается автоматически из строк условий." />
+      <SectionTitle icon={<FileSpreadsheet />} title="Классификатор" meta={props.dirty ? `${props.rules.length}/${props.totalRules} правил · не сохранено` : `${props.rules.length}/${props.totalRules} правил`} hint="Правила сохраняются в classifiers/rules.csv. JSON дополнительных условий собирается автоматически из строк условий." />
       <div className="toolbar wrap">
         <label className="search-field">
           <Search size={17} />
@@ -3860,6 +3978,42 @@ function SimpleTable(props: { columns: string[]; rows: Record<string, unknown>[]
 function visibleProductColumns(columns: string[]) {
   const visible = columns.filter((column) => !column.startsWith("__"));
   return visible.length ? visible : columns;
+}
+
+function UnsavedChangesModal(props: {
+  kind: EditableWorkspace;
+  busy: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+}) {
+  const title = props.kind === "catalog" ? "Сохранить изменения справочника?" : "Сохранить изменения правил?";
+  const detail =
+    props.kind === "catalog"
+      ? "В справочнике категорий есть правки, которые ещё не записаны в CSV."
+      : "В классификаторе есть правки, которые ещё не записаны в classifiers/rules.csv.";
+  return (
+    <div className="modal-backdrop confirm-backdrop" role="presentation">
+      <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="unsaved-changes-title">
+        <div className="modal-head">
+          <div>
+            <h2 id="unsaved-changes-title">{title}</h2>
+            <p>{detail}</p>
+          </div>
+          <button className="icon-button" aria-label="Остаться в редакторе" disabled={props.busy} onClick={props.onCancel}><X size={18} /></button>
+        </div>
+        <div className="confirm-content">
+          <AlertTriangle size={20} />
+          <p>Если уйти без сохранения, локальные правки в этом редакторе будут сброшены до последней сохранённой версии.</p>
+        </div>
+        <div className="confirm-actions">
+          <button className="ghost-button" disabled={props.busy} onClick={props.onCancel}>Остаться</button>
+          <button className="ghost-button danger-inline" disabled={props.busy} onClick={props.onDiscard}>Не сохранять</button>
+          <button className="primary-inline-button" disabled={props.busy} onClick={props.onSave}><Save size={17} />Сохранить</button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function PipelineOperationModal(props: {

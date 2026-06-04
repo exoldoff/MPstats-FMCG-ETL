@@ -2589,6 +2589,43 @@ th {
   z-index: 60;
 }
 
+.confirm-backdrop {
+  z-index: 70;
+}
+
+.confirm-modal {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  width: min(520px, 100%);
+  max-height: min(520px, calc(100vh - 40px));
+  border: 1px solid #cbd6d9;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(13 31 35 / 28%);
+}
+
+.confirm-content {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 12px;
+  padding: 18px;
+  color: #334145;
+  line-height: 1.45;
+}
+
+.confirm-content svg {
+  color: #9b6b18;
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 18px 18px;
+  border-top: 1px solid #e1e8ea;
+}
+
 .operation-modal {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
