@@ -333,6 +333,34 @@ diff_counts:
 
 A/B должны дать достаточный эффект без изменения бизнес-семантики и без тяжёлых зависимостей.
 
+## Step 1 results: literal `contains` without regex
+
+Изменение:
+
+```text
+match_type == "contains":
+  before: str.contains(re.escape(pattern), case=False, regex=True, na=False)
+  after:  str.contains(pattern, case=False, regex=False, na=False)
+```
+
+Корректность:
+
+| Run | Row count | Columns | Категория | Подкатегория | Бренд | Тип | Вид мяса |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| mock small old vs Step 1 | match | match | 0 | 0 | 0 | 0 | n/a |
+| mock medium old vs Step 1 | match | match | 0 | 0 | 0 | 0 | n/a |
+| real 10k old vs Step 1 | match | match | 0 | 0 | 0 | 0 | 0 |
+
+Single-run benchmark:
+
+| Run | Old total | Step 1 total | Total speedup | Old apply | Step 1 apply | Apply speedup | Old contains | Step 1 contains |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mock small | 0.2332s | 0.2552s | 0.91x | 0.1589s | 0.1775s | 0.90x | 0.0149s | 0.0098s |
+| mock medium | 2.4356s | 2.4153s | 1.01x | 1.6223s | 1.6951s | 0.96x | 0.1478s | 0.1569s |
+| real 10k | 0.6771s | 0.7447s | 0.91x | 0.5907s | 0.6534s | 0.90x | 0.1019s | 0.0576s |
+
+Вывод: семантика не изменилась. На real sample literal `contains` стал быстрее по собственной фазе (`0.1019s -> 0.0576s`), но общий single-run total оказался хуже из-за шума и более дорогого regex slice в этом прогоне. Step 1 оставлен как безопасное семантическое упрощение: `contains` больше не запускает regex engine для literal substring.
+
 ## 10. Recommended next step
 
 Step 1:

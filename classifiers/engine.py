@@ -232,7 +232,7 @@ def _normalize_fill_unclassified(
 def _build_match_mask(series: pd.Series, match_type: str, pattern: str) -> pd.Series:
     text = series.fillna("").astype(str)
     if match_type == "contains":
-        return text.str.contains(re.escape(pattern), case=False, regex=True, na=False)
+        return text.str.contains(pattern, case=False, regex=False, na=False)
     if match_type == "not_contains":
         return ~text.str.contains(re.escape(pattern), case=False, regex=True, na=False)
     if match_type == "regex":

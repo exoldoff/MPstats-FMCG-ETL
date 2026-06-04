@@ -298,6 +298,33 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(report["applied_rows"].sum(), 2)
             self.assertEqual(result["Подкатегория"].tolist(), ["Мясо", "Прочее"])
 
+    def test_contains_rule_treats_regex_special_chars_as_literal_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            pattern = "a.b+(x)[y]*?"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        f"1;1;*;Подкатегория;Название;contains;{pattern};Literal;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame(
+                [
+                    {"Категория": "Тест", "Название": f"prefix {pattern} suffix"},
+                    {"Категория": "Тест", "Название": "prefix axbxxxy suffix"},
+                ]
+            )
+
+            result, report = apply_classifiers(frame, rules_file)
+
+            self.assertEqual(int(report.iloc[0]["applied_rows"]), 1)
+            self.assertEqual(result["Подкатегория"].fillna("").tolist(), ["Literal", ""])
+
     def test_default_meat_rules_follow_reference_categories(self) -> None:
         cases = [
             ("Котлеты Три мяса Слово Мясника, 360 г", "Кулинария"),
