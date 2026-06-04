@@ -115,6 +115,15 @@ export type PipelineRun = {
   month_count?: number;
   progress?: number;
   is_active?: boolean;
+  operation_progress?: {
+    kind: "reclassify" | "rebuild" | string;
+    total_files: number;
+    completed_files: number;
+    failed_files: number;
+    remaining_files: number;
+    progress: number;
+    status?: string;
+  } | null;
 };
 
 export type DownloadTask = {

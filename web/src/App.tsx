@@ -3870,15 +3870,20 @@ function PipelineOperationModal(props: {
   onOpenCube: () => void;
 }) {
   const run = props.run;
-  const total = run?.total_tasks ?? 0;
-  const completed = run?.completed_tasks ?? 0;
-  const failed = run?.failed_tasks ?? 0;
-  const remaining = run?.remaining_tasks ?? Math.max(0, total - completed - failed);
-  const progress = Math.max(0, Math.min(100, run?.progress ?? (total ? Math.round((completed / total) * 100) : 0)));
+  const operationProgress = run?.operation_progress?.kind === props.operation.kind ? run.operation_progress : null;
+  const total = operationProgress?.total_files ?? run?.total_tasks ?? 0;
+  const completed = operationProgress?.completed_files ?? run?.completed_tasks ?? 0;
+  const failed = operationProgress?.failed_files ?? run?.failed_tasks ?? 0;
+  const remaining = operationProgress?.remaining_files ?? run?.remaining_tasks ?? Math.max(0, total - completed - failed);
+  const progress = Math.max(
+    0,
+    Math.min(100, operationProgress?.progress ?? run?.progress ?? (total ? Math.round((completed / total) * 100) : 0))
+  );
   const status = run?.status ?? (props.operation.finishedAt ? "succeeded" : "running");
   const active = isActiveRunStatus(status) || (!props.operation.finishedAt && status === "running");
   const steps = pipelineOperationSteps(props.operation.kind);
   const currentStepIndex = pipelineOperationStepIndex(props.operation.kind, run?.current_step ?? "", status);
+  const completedMetric = props.operation.kind === "reclassify" ? "Переклассифицировано" : "Готово";
 
   return (
     <div className="modal-backdrop operation-backdrop" role="presentation">
@@ -3901,7 +3906,8 @@ function PipelineOperationModal(props: {
             </div>
             <div className="operation-progress-track"><span style={{ width: `${progress}%` }} /></div>
             <div className="operation-metrics">
-              <span>Готово: <strong>{completed}</strong></span>
+              {operationProgress ? <span>Файлов: <strong>{total}</strong></span> : null}
+              <span>{completedMetric}: <strong>{completed}</strong></span>
               <span>Осталось: <strong>{remaining}</strong></span>
               <span>Ошибок: <strong>{failed}</strong></span>
             </div>
