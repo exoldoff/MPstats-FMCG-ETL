@@ -15,6 +15,7 @@ import {
   Github,
   History,
   ListChecks,
+  LoaderCircle,
   PanelLeftClose,
   PanelLeftOpen,
   Pause,
@@ -136,6 +137,15 @@ type ExportFilterDraft = { id: string; column: string; match_type: string; value
 type CubeMatrixCell = { status: "ready" | "missing"; period: string; rowsCount: number; title: string };
 type CubeMatrixRow = { categoryKey: string; categoryName: string; cells: CubeMatrixCell[]; missingCount: number };
 type CubeMatrix = { marketplaces: string[]; rows: CubeMatrixRow[]; missingCount: number; totalCells: number; targetPeriods: Record<string, string> };
+type PipelineOperationKind = "start" | "pause" | "stop" | "resume" | "retry" | "rebuild" | "reclassify" | "sync";
+type PipelineOperation = {
+  kind: PipelineOperationKind;
+  label: string;
+  detail: string;
+  runId: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+};
 
 const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Подкатегория", "Тип", "Вид мяса"];
 
@@ -172,6 +182,7 @@ const statusLabels: Record<string, string> = {
 
 const activeRunStatuses = new Set(["running", "pausing", "stopping"]);
 const passiveCubeActions = new Set(["Предпросмотр БД", "Поиск в БД"]);
+const activeTaskStatuses = new Set(["downloading", "processing", "classifying", "saving_to_db", "running", "pausing", "stopping"]);
 
 function isActiveRunStatus(status: string | null | undefined) {
   return Boolean(status && activeRunStatuses.has(status));
@@ -228,6 +239,16 @@ function sleep(ms: number) {
 
 function addLoadError(errors: string[], label: string, reason: unknown) {
   errors.push(`${label}: ${errorText(reason)}`);
+}
+
+function isPipelineRun(value: unknown): value is PipelineRun {
+  return isRecord(value) && typeof value.id === "string" && typeof value.status === "string" && typeof value.total_tasks === "number";
+}
+
+function liveSmartPlanStatus(task: SmartPlanTask) {
+  return [task.pipeline_status, task.download_status, task.process_status, task.classify_status, task.save_status].find((status) =>
+    activeTaskStatuses.has(status)
+  ) ?? null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -478,6 +499,7 @@ export function App() {
   const [reportPreview, setReportPreview] = useState<ReportPreview | null>(null);
   const [reportArtifacts, setReportArtifacts] = useState<ReportArtifact[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pipelineOperation, setPipelineOperation] = useState<PipelineOperation | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [instructionOpen, setInstructionOpen] = useState(false);
@@ -510,6 +532,18 @@ export function App() {
       void loadDbPreview().catch((exc) => setError(`Предпросмотр БД: ${errorText(exc)}`));
     }
   }, [run?.id, run?.status, tab]);
+
+  useEffect(() => {
+    if (!pipelineOperation?.runId || pipelineOperation.finishedAt || run?.id !== pipelineOperation.runId) return;
+    if (isActiveRunStatus(run.status)) return;
+    setPipelineOperation((current) =>
+      current?.runId === run.id && !current.finishedAt ? { ...current, finishedAt: Date.now() } : current
+    );
+    void refreshFilesAndCube(run.project_name || projectName);
+    if (tab === "cube" || products) {
+      void loadDbPreview().catch((exc) => setError(`Предпросмотр БД: ${errorText(exc)}`));
+    }
+  }, [pipelineOperation?.runId, pipelineOperation?.finishedAt, run?.id, run?.status, tab]);
 
   useEffect(() => {
     if (tab === "catalog" && catalogRows.length === 0) {
@@ -1095,26 +1129,51 @@ export function App() {
     return response;
   }
 
-  async function runAction<T>(label: string, action: () => Promise<T>, onSuccess?: (value: T) => void) {
+  async function runAction<T>(label: string, action: () => Promise<T>, onSuccess?: (value: T) => void): Promise<T | null> {
     setBusy(label);
     setError(null);
     setMessage(null);
     try {
       const result = await action();
       onSuccess?.(result);
-      setMessage(`${label}: готово`);
-      if (tab === "files" || tab === "cube") {
-        await refreshFilesAndCube();
-      } else if (tab === "plan") {
-        await refreshCube();
+      const backgroundRun = isPipelineRun(result) && isActiveRunStatus(result.status);
+      setMessage(backgroundRun ? `${label}: запущено, прогресс открыт` : `${label}: готово`);
+      if (!backgroundRun) {
+        if (tab === "files" || tab === "cube") {
+          await refreshFilesAndCube();
+        } else if (tab === "plan") {
+          await refreshCube();
+        }
+        if (tab === "cube" && !passiveCubeActions.has(label)) {
+          await loadDbPreview();
+        }
       }
-      if (tab === "cube" && !passiveCubeActions.has(label)) {
-        await loadDbPreview();
-      }
+      return result;
     } catch (exc) {
       setError(errorText(exc));
+      return null;
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function runPipelineAction(
+    kind: PipelineOperationKind,
+    label: string,
+    detail: string,
+    action: () => Promise<PipelineRun>,
+    onSuccess?: (value: PipelineRun) => void
+  ) {
+    setPipelineOperation({ kind, label, detail, runId: run?.id ?? null, startedAt: Date.now(), finishedAt: null });
+    const result = await runAction(label, action, (fresh) => {
+      setRun(fresh);
+      setPipelineOperation((current) =>
+        current ? { ...current, runId: fresh.id, finishedAt: isActiveRunStatus(fresh.status) ? null : Date.now() } : current
+      );
+      onSuccess?.(fresh);
+    });
+    if (!result) {
+      setPipelineOperation((current) => (current?.label === label ? null : current));
     }
   }
 
@@ -1462,6 +1521,7 @@ export function App() {
     setTab("plan");
     await refreshRun(created.id, "all");
     await refreshCube(projectName);
+    return created;
   }
 
   function workflowSettingsPayload(targetProjectName = projectName) {
@@ -1485,6 +1545,8 @@ export function App() {
   const runIsPaused = run?.status === "paused";
   const runHasTasks = Boolean(run?.id && (run.total_tasks ?? 0) > 0);
   const runHasRemainingWork = Boolean(run?.id && ((run.remaining_tasks ?? 0) > 0 || (run.failed_tasks ?? 0) > 0));
+  const operationRun = pipelineOperation && (!pipelineOperation.runId || run?.id === pipelineOperation.runId) ? run : null;
+  const activeOperationKind = pipelineOperation && !pipelineOperation.finishedAt ? pipelineOperation.kind : null;
   const canCreatePlan = !busy && !runIsActive && (mode === "monthly_sync" || (selected.size > 0 && monthsCount > 0));
   const canStartRun = !busy && !runIsActive && runHasTasks && runHasRemainingWork;
   const canPauseRun = !busy && Boolean(run?.id) && runIsRunning;
@@ -1501,6 +1563,7 @@ export function App() {
         : runIsActive
           ? "Дождись завершения текущего запуска или поставь его на паузу."
           : undefined;
+  const runBusyTitle = runIsActive ? "Дождись завершения текущей операции или поставь запуск на паузу." : undefined;
 
   return (
     <div className="workflow-shell">
@@ -1539,6 +1602,15 @@ export function App() {
 
       {error ? <Notice tone="error" text={error} onClose={() => setError(null)} /> : null}
       {message ? <Notice tone="success" text={message} onClose={() => setMessage(null)} /> : null}
+      {pipelineOperation ? (
+        <PipelineOperationModal
+          operation={pipelineOperation}
+          run={operationRun}
+          onClose={() => setPipelineOperation(null)}
+          onOpenPlan={() => setTab("plan")}
+          onOpenCube={() => setTab("cube")}
+        />
+      ) : null}
 
       <main className={`workflow-grid ${leftRailCollapsed ? "left-collapsed" : ""}`}>
         <aside className={`left-rail ${leftRailCollapsed ? "collapsed" : ""}`}>
@@ -2048,42 +2120,82 @@ export function App() {
             <SectionTitle icon={<Play />} title="Текущий запуск" />
             <RunSummary run={run} selectedCount={selectedCategories.length} monthsCount={monthsCount} mode={mode} />
             <div className="action-stack">
-              <button className="action-button" disabled={!canCreatePlan} title={createPlanDisabledTitle} onClick={() => void runAction("Создание плана", createPlan)}>
-                <ListChecks size={20} />
-                <span><strong>Создать план</strong><small>Проверить manifest и файлы</small></span>
-              </button>
-              <button className="action-button" disabled={!canStartRun} onClick={() => run?.id && void runAction("Запуск", () => api.startRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
-                <Play size={20} />
-                <span><strong>Запустить</strong><small>Ожидающие задачи и ошибки</small></span>
-              </button>
-              <button className="action-button" disabled={!canPauseRun} onClick={() => run?.id && void runAction("Пауза", () => api.pauseRun(run.id), setRun)}>
-                <Pause size={20} />
-                <span><strong>Пауза</strong><small>Остановится между стадиями</small></span>
-              </button>
-              <button className="action-button danger-action" disabled={!canStopRun} onClick={() => run?.id && void runAction("Остановка", () => api.stopRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
-                <X size={20} />
-                <span><strong>Остановить</strong><small>Завершить текущий pipeline</small></span>
-              </button>
-              <button className="action-button" disabled={!canResumeRun} onClick={() => run?.id && void runAction("Продолжение", () => api.resumeRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
-                <SkipForward size={20} />
-                <span><strong>Продолжить</strong><small>Незавершённый запуск</small></span>
-              </button>
-              <button className="action-button" disabled={!canRetryErrors} onClick={() => run?.id && void runAction("Повтор ошибок", () => api.retryErrors(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
-                <RotateCcw size={20} />
-                <span><strong>Повторить ошибки</strong><small>Только задачи с ошибкой</small></span>
-              </button>
-              <button className="action-button" disabled={!canRebuildCube} onClick={() => run?.id && void runAction("Сборка куба", () => api.rebuildCube(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
-                <Database size={20} />
-                <span><strong>Собрать куб из готовых файлов</strong><small>Без повторного скачивания</small></span>
-              </button>
-              <button className="action-button" disabled={!canRebuildCube} onClick={() => run?.id && void runAction("Повторная классификация куба", () => api.reclassifyCube(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
-                <RotateCcw size={20} />
-                <span><strong>Переклассифицировать куб</strong><small>Перезаписать classified и БД</small></span>
-              </button>
-              <button className="action-button accent" disabled={!canSyncNewMonth} onClick={() => void runAction("Синхронизация нового месяца", syncNewMonth)}>
-                <RefreshCcw size={20} />
-                <span><strong>Синхронизировать новый месяц</strong><small>Следующий месяц по registry</small></span>
-              </button>
+              <div className="action-group">
+                <span className="action-group-label">План</span>
+                <button className="action-button" disabled={!canCreatePlan} title={createPlanDisabledTitle} onClick={() => void runAction("Создание плана", createPlan)}>
+                  <ListChecks size={20} />
+                  <span><strong>Создать план</strong><small>Проверить manifest и файлы</small></span>
+                </button>
+                <button
+                  className={`action-button ${activeOperationKind === "start" ? "is-working" : ""}`}
+                  disabled={!canStartRun}
+                  title={runBusyTitle}
+                  onClick={() => run?.id && void runPipelineAction("start", "Запуск", "Выполняются ожидающие задачи и ошибки текущего плана.", () => api.startRun(run.id), (fresh) => { void refreshRun(fresh.id); })}
+                >
+                  {activeOperationKind === "start" ? <LoaderCircle className="spin" size={20} /> : <Play size={20} />}
+                  <span><strong>{activeOperationKind === "start" ? "Запуск идёт" : "Запустить"}</strong><small>Ожидающие задачи и ошибки</small></span>
+                </button>
+                <button className="action-button" disabled={!canPauseRun} title={runBusyTitle} onClick={() => run?.id && void runAction("Пауза", () => api.pauseRun(run.id), setRun)}>
+                  <Pause size={20} />
+                  <span><strong>Пауза</strong><small>Остановится между стадиями</small></span>
+                </button>
+                <button className="action-button danger-action" disabled={!canStopRun} onClick={() => run?.id && void runAction("Остановка", () => api.stopRun(run.id), (fresh) => { setRun(fresh); void refreshRun(fresh.id); })}>
+                  <X size={20} />
+                  <span><strong>Остановить</strong><small>Завершить текущий pipeline</small></span>
+                </button>
+              </div>
+              <div className="action-group">
+                <span className="action-group-label">Восстановление</span>
+                <button
+                  className={`action-button ${activeOperationKind === "resume" ? "is-working" : ""}`}
+                  disabled={!canResumeRun}
+                  onClick={() => run?.id && void runPipelineAction("resume", "Продолжение", "Продолжается незавершённый запуск.", () => api.resumeRun(run.id), (fresh) => { void refreshRun(fresh.id); })}
+                >
+                  {activeOperationKind === "resume" ? <LoaderCircle className="spin" size={20} /> : <SkipForward size={20} />}
+                  <span><strong>{activeOperationKind === "resume" ? "Продолжение идёт" : "Продолжить"}</strong><small>Незавершённый запуск</small></span>
+                </button>
+                <button
+                  className={`action-button ${activeOperationKind === "retry" ? "is-working" : ""}`}
+                  disabled={!canRetryErrors}
+                  onClick={() => run?.id && void runPipelineAction("retry", "Повтор ошибок", "Перезапускаются только задачи, которые завершились ошибкой.", () => api.retryErrors(run.id), (fresh) => { void refreshRun(fresh.id); })}
+                >
+                  {activeOperationKind === "retry" ? <LoaderCircle className="spin" size={20} /> : <RotateCcw size={20} />}
+                  <span><strong>{activeOperationKind === "retry" ? "Повтор идёт" : "Повторить ошибки"}</strong><small>Только задачи с ошибкой</small></span>
+                </button>
+              </div>
+              <div className="action-group">
+                <span className="action-group-label">Куб и классификация</span>
+                <button
+                  className={`action-button ${activeOperationKind === "rebuild" ? "is-working" : ""}`}
+                  disabled={!canRebuildCube}
+                  title={runBusyTitle}
+                  onClick={() => run?.id && void runPipelineAction("rebuild", "Сборка куба", "Готовые classified-файлы сохраняются в локальный куб без повторного скачивания.", () => api.rebuildCube(run.id), (fresh) => { void refreshRun(fresh.id); })}
+                >
+                  {activeOperationKind === "rebuild" ? <LoaderCircle className="spin" size={20} /> : <Database size={20} />}
+                  <span><strong>{activeOperationKind === "rebuild" ? "Сборка куба идёт" : "Собрать куб из готовых файлов"}</strong><small>Без повторного скачивания</small></span>
+                </button>
+                <button
+                  className={`action-button ${activeOperationKind === "reclassify" ? "is-working" : ""}`}
+                  disabled={!canRebuildCube}
+                  title={runBusyTitle}
+                  onClick={() => run?.id && void runPipelineAction("reclassify", "Повторная классификация куба", "Применяются текущие правила: classified-файлы и срезы БД будут заменены по задачам плана.", () => api.reclassifyCube(run.id), (fresh) => { void refreshRun(fresh.id); })}
+                >
+                  {activeOperationKind === "reclassify" ? <LoaderCircle className="spin" size={20} /> : <RotateCcw size={20} />}
+                  <span><strong>{activeOperationKind === "reclassify" ? "Переклассификация идёт" : "Переклассифицировать куб"}</strong><small>Перезаписать classified и БД</small></span>
+                </button>
+              </div>
+              <div className="action-group">
+                <span className="action-group-label">Ежемесячно</span>
+                <button
+                  className={`action-button accent ${activeOperationKind === "sync" ? "is-working" : ""}`}
+                  disabled={!canSyncNewMonth}
+                  title={runBusyTitle}
+                  onClick={() => void runPipelineAction("sync", "Синхронизация нового месяца", "Создаётся и запускается план на следующий месяц по registry куба.", syncNewMonth, (fresh) => { void refreshRun(fresh.id); })}
+                >
+                  {activeOperationKind === "sync" ? <LoaderCircle className="spin" size={20} /> : <RefreshCcw size={20} />}
+                  <span><strong>{activeOperationKind === "sync" ? "Синхронизация идёт" : "Синхронизировать новый месяц"}</strong><small>Следующий месяц по registry</small></span>
+                </button>
+              </div>
             </div>
           </section>
 
@@ -2512,8 +2624,11 @@ function SmartPlanTable(props: { tasks: SmartPlanTask[]; onRetry: (taskId: strin
         {
           id: "smart_status",
           label: "Статус",
-          value: (task) => statusLabels[task.smart_status] ?? task.smart_status,
-          render: (task) => <Badge value={task.smart_status} />
+          value: (task) => {
+            const liveStatus = liveSmartPlanStatus(task);
+            return statusLabels[liveStatus ?? task.smart_status] ?? liveStatus ?? task.smart_status;
+          },
+          render: (task) => <Badge value={liveSmartPlanStatus(task) ?? task.smart_status} />
         },
         { id: "category", label: "Категория", value: (task) => task.category_name, title: (task) => task.category_path },
         { id: "marketplace", label: "Marketplace", value: (task) => task.marketplace },
@@ -2534,17 +2649,27 @@ function SmartPlanTable(props: { tasks: SmartPlanTask[]; onRetry: (taskId: strin
         {
           id: "reason",
           label: "Причина",
-          value: (task) => task.reason,
-          title: (task) => task.reason
+          value: (task) => {
+            const liveStatus = liveSmartPlanStatus(task);
+            return liveStatus ? `Идёт: ${statusLabels[liveStatus] ?? liveStatus}` : task.reason;
+          },
+          title: (task) => {
+            const liveStatus = liveSmartPlanStatus(task);
+            return liveStatus ? `Идёт: ${statusLabels[liveStatus] ?? liveStatus}. ${task.reason}` : task.reason;
+          },
+          render: (task) => {
+            const liveStatus = liveSmartPlanStatus(task);
+            return liveStatus ? <span className="live-reason">Идёт: {statusLabels[liveStatus] ?? liveStatus}</span> : task.reason;
+          }
         },
         {
           id: "action",
           label: "Действие",
-          value: (task) => task.recommended_action,
+          value: (task) => liveSmartPlanStatus(task) ? "Дождись завершения операции" : task.recommended_action,
           render: (task) => (
             <div className="task-action-cell">
-              <span>{task.recommended_action}</span>
-              {task.smart_status === "failed" ? <button className="tiny-button" onClick={() => props.onRetry(task.task_id)}>повтор</button> : null}
+              <span>{liveSmartPlanStatus(task) ? "Дождись завершения операции" : task.recommended_action}</span>
+              {task.smart_status === "failed" && !liveSmartPlanStatus(task) ? <button className="tiny-button" onClick={() => props.onRetry(task.task_id)}>повтор</button> : null}
             </div>
           )
         },
@@ -2560,8 +2685,9 @@ function SmartPlanTable(props: { tasks: SmartPlanTask[]; onRetry: (taskId: strin
 }
 
 function SmartPlanFileChain(props: { task: SmartPlanTask }) {
+  const liveStatus = liveSmartPlanStatus(props.task);
   return (
-    <div className={`file-chain ${props.task.smart_status}`}>
+    <div className={`file-chain ${liveStatus ?? props.task.smart_status}`}>
       <SmartPlanFilePill label="raw" file={props.task.raw_file} />
       <SmartPlanFilePill label="processed" file={props.task.processed_file} />
       <SmartPlanFilePill label="classified" file={props.task.classified_file} />
@@ -3726,6 +3852,96 @@ function SimpleTable(props: { columns: string[]; rows: Record<string, unknown>[]
 function visibleProductColumns(columns: string[]) {
   const visible = columns.filter((column) => !column.startsWith("__"));
   return visible.length ? visible : columns;
+}
+
+function PipelineOperationModal(props: {
+  operation: PipelineOperation;
+  run: PipelineRun | null;
+  onClose: () => void;
+  onOpenPlan: () => void;
+  onOpenCube: () => void;
+}) {
+  const run = props.run;
+  const total = run?.total_tasks ?? 0;
+  const completed = run?.completed_tasks ?? 0;
+  const failed = run?.failed_tasks ?? 0;
+  const remaining = run?.remaining_tasks ?? Math.max(0, total - completed - failed);
+  const progress = Math.max(0, Math.min(100, run?.progress ?? (total ? Math.round((completed / total) * 100) : 0)));
+  const status = run?.status ?? (props.operation.finishedAt ? "succeeded" : "running");
+  const active = isActiveRunStatus(status) || (!props.operation.finishedAt && status === "running");
+  const steps = pipelineOperationSteps(props.operation.kind);
+  const currentStepIndex = pipelineOperationStepIndex(props.operation.kind, run?.current_step ?? "", status);
+
+  return (
+    <div className="modal-backdrop operation-backdrop" role="presentation">
+      <section className="operation-modal" role="dialog" aria-modal="true" aria-labelledby="pipeline-operation-title">
+        <div className="modal-head">
+          <div>
+            <h2 id="pipeline-operation-title">{props.operation.label}</h2>
+            <p>{props.operation.detail}</p>
+          </div>
+          <button className="icon-button" aria-label={active ? "Скрыть прогресс" : "Закрыть прогресс"} onClick={props.onClose}><X size={18} /></button>
+        </div>
+        <div className="operation-content">
+          <div className={`operation-status ${status}`}>
+            <div className="operation-progress-head">
+              <div>
+                <strong>{statusLabels[status] ?? status}</strong>
+                <span>{run?.current_step || (active ? "Старт операции" : "Операция завершена")}</span>
+              </div>
+              <b>{progress}%</b>
+            </div>
+            <div className="operation-progress-track"><span style={{ width: `${progress}%` }} /></div>
+            <div className="operation-metrics">
+              <span>Готово: <strong>{completed}</strong></span>
+              <span>Осталось: <strong>{remaining}</strong></span>
+              <span>Ошибок: <strong>{failed}</strong></span>
+            </div>
+          </div>
+          <ol className="operation-steps">
+            {steps.map((step, index) => {
+              const stepState = !active
+                ? status === "failed" || status === "completed_with_errors"
+                  ? index < currentStepIndex ? "done" : index === currentStepIndex ? "current" : ""
+                  : "done"
+                : index < currentStepIndex ? "done" : index === currentStepIndex ? "current" : "";
+              return <li className={stepState} key={step}>{step}</li>;
+            })}
+          </ol>
+          {props.operation.kind === "reclassify" ? (
+            <div className="operation-note">
+              <AlertTriangle size={16} />
+              <span>Во время переклассификации classified-файлы и срезы БД заменяются по задачам плана. Предпросмотр куба обновится после статуса «готово».</span>
+            </div>
+          ) : null}
+        </div>
+        <div className="operation-actions">
+          <button className="ghost-button" onClick={props.onOpenPlan}>Умный план</button>
+          <button className="ghost-button" onClick={props.onOpenCube}>Куб</button>
+          <button className="primary-inline-button" onClick={props.onClose}>{active ? "Скрыть" : "Закрыть"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function pipelineOperationSteps(kind: PipelineOperationKind) {
+  if (kind === "reclassify") {
+    return ["Проверка processed-файлов", "Применение правил классификатора", "Замена срезов БД", "Обновление куба в интерфейсе"];
+  }
+  if (kind === "rebuild") {
+    return ["Проверка classified-файлов", "Сохранение срезов в БД", "Обновление registry", "Обновление куба в интерфейсе"];
+  }
+  return ["Скачивание", "Обработка", "Классификация", "Сохранение в БД"];
+}
+
+function pipelineOperationStepIndex(kind: PipelineOperationKind, currentStep: string, status: string) {
+  if (!isActiveRunStatus(status)) return pipelineOperationSteps(kind).length - 1;
+  const text = currentStep.toLowerCase();
+  if (text.includes("сохран")) return kind === "reclassify" ? 2 : 3;
+  if (text.includes("классиф")) return kind === "reclassify" ? 1 : 2;
+  if (text.includes("обработ")) return 1;
+  return 0;
 }
 
 function ProductInstructionModal(props: { onClose: () => void }) {
