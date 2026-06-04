@@ -34,7 +34,7 @@
 | Классификация | `classifiers/rules.csv`, `classifiers/engine.py`, `mpstats_app/services/classifier_rules_service.py` | Правила web-редактора и движок классификатора |
 | Сервисы шагов | `pipeline/services/` | Внутренняя бизнес-логика, вызываемая web-app |
 | Файловый слой | `pipeline/repositories/` | Чтение/запись CSV/JSON |
-| SQL-хранилище | `pipeline/repositories/sql_repository.py`, `pipeline/services/sql_service.py`, `pipeline/migrations/`, `mpstats_app/repositories/duckdb_repository.py` | DuckDB-хранилище web-app |
+| SQL-хранилище | `pipeline/repositories/sql_repository.py`, `pipeline/migrations/`, `mpstats_app/repositories/duckdb_repository.py` | DuckDB-хранилище web-app |
 | Web API | `mpstats_app/api/`, `mpstats_app/schemas.py`, `tests/test_web_api.py` | Backend routes, схемы, API-регрессии |
 | Рабочие данные | `data/projects/`, `mpstats.duckdb` | Проверка конкретных web-выгрузок и отчётов |
 
@@ -91,7 +91,7 @@ python3 -m pytest tests/test_web_api.py
 - Шаг 4: `pipeline/services/weight_parser_service.py`.
 - Шаг 5: `pipeline/services/merge_service.py`.
 - Шаг 6: `pipeline/services/classification_service.py` + `classifiers/engine.py`.
-- SQL: `pipeline/services/sql_service.py` + `pipeline/repositories/sql_repository.py`.
+- SQL/DuckDB: `mpstats_app/repositories/duckdb_repository.py` + общий helper `pipeline/repositories/sql_repository.py`.
 - Smart workflow web-app: `mpstats_app/services/smart_pipeline_service.py`, `mpstats_app/services/category_catalog_service.py`, `mpstats_app/services/classifier_rules_service.py`, `web/src/App.tsx`.
 
 ## Что уже есть
