@@ -361,35 +361,50 @@ Single-run benchmark:
 
 Вывод: семантика не изменилась. На real sample literal `contains` стал быстрее по собственной фазе (`0.1019s -> 0.0576s`), но общий single-run total оказался хуже из-за шума и более дорогого regex slice в этом прогоне. Step 1 оставлен как безопасное семантическое упрощение: `contains` больше не запускает regex engine для literal substring.
 
+## Step 2 results: category prefilter before matching
+
+Изменение:
+
+```text
+category-specific rule:
+  before: build text/regex mask for all rows, then apply category mask
+  after:  build category mask first, run text/regex only on candidate subset
+```
+
+Корректность:
+
+| Run | Row count | Columns | Категория | Подкатегория | Бренд | Тип | Вид мяса |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| mock small Step 1 vs Step 2 | match | match | 0 | 0 | 0 | 0 | n/a |
+| mock medium Step 1 vs Step 2 | match | match | 0 | 0 | 0 | 0 | n/a |
+| real 10k Step 1 vs Step 2 | match | match | 0 | 0 | 0 | 0 | 0 |
+| largest real 238,499 rows Step 1 vs Step 2 | match | match | 0 | 0 | 0 | 0 | 0 |
+
+Single-run benchmark:
+
+| Run | Step 1 total | Step 2 total | Total speedup | Step 1 apply | Step 2 apply | Apply speedup | Rows/sec Step 1 | Rows/sec Step 2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mock small | 0.2552s | 0.1513s | 1.69x | 0.1775s | 0.0769s | 2.31x | 39,179 | 66,109 |
+| mock medium | 2.4153s | 1.3464s | 1.79x | 1.6951s | 0.6807s | 2.49x | 41,402 | 74,270 |
+| real 10k | 0.7447s | 0.2025s | 3.68x | 0.6534s | 0.1173s | 5.57x | 13,429 | 49,382 |
+| largest real 238,499 rows, cProfile | 18.2198s | 7.0386s | 2.59x | 16.0981s | 4.9819s | 3.23x | 13,090 | 33,884 |
+
+String matching reduction:
+
+| Run | Step 1 checks | Step 2 checks | Candidate row checks skipped | Step 1 match calls | Step 2 match calls | Expensive match calls skipped |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| mock small | 100,000 | 46,250 | 53,750 | 10 | 10 | 0 |
+| mock medium | 1,000,000 | 462,500 | 537,500 | 10 | 10 | 0 |
+| real 10k | 420,000 | 80,000 | 340,000 | 42 | 8 | 34 |
+| largest real 238,499 rows | 10,016,958 | 1,907,992 | 8,108,966 | 42 | 8 | 34 |
+
+На real samples Step 2 полностью пропустил regex rules, которые не относятся к категории файла: regex matching `0.4581s -> 0s` на real 10k и `8.8231s -> 0s` на крупнейшем файле. Category mask строится заново внутри каждого правила на текущем `out`, поэтому правила, которые раньше изменили `Категория`, видны следующим category filters.
+
 ## 10. Recommended next step
 
-Step 1:
+Step 1 и Step 2 выполнены. Следующий безопасный кандидат - кэшировать загруженные и подготовленные rules по `(path, mtime, size)` и отдельно замерить smart/reclassify сценарий, где классификация запускается по многим task-файлам подряд.
 
-Самая безопасная маленькая оптимизация - заменить `contains` на literal `regex=False` и добавить regression benchmark comparison:
-
-```text
-old output vs optimized output
-row count, columns, Категория/Подкатегория/Бренд/Тип/Вид мяса diffs = 0
-```
-
-Ожидаемый эффект: снизить долю regex engine для `contains` rules и extra conditions. Это маленький diff в `classifiers/engine.py`.
-
-Step 2:
-
-Следующая оптимизация - category prefilter before matching:
-
-```text
-if rule.category not in {"", "*"}:
-    build category mask first
-    if no candidate rows:
-        skip expensive text/regex mask
-    else:
-        run match only on candidate index
-```
-
-Ожидаемый эффект: большой выигрыш в smart/reclassify сценариях, где один файл обычно относится к одной категории, а активные правила включают несколько категорий.
-
-После каждого шага обязательно:
+После следующего шага обязательно:
 
 - прогнать `python3 -m pytest tests/test_pipeline_services.py -q`;
 - прогнать `python3 scripts/benchmark_classifier.py run --all-sizes`;

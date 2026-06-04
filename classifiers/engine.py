@@ -333,6 +333,22 @@ def _rule_uses_otherwise(match_type: str, conditions: list[dict[str, str]]) -> b
     return match_type == "otherwise" or any(condition["match_type"] == "otherwise" for condition in conditions)
 
 
+def _build_category_mask(df: pd.DataFrame, *, row_num: int, category_column: str, rule_category: str) -> pd.Series:
+    if category_column not in df.columns:
+        raise ValueError(
+            f"Rule row {row_num} has category filter '{rule_category}', "
+            f"but dataframe has no '{category_column}' column."
+        )
+    return (
+        df[category_column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+        .eq(rule_category.casefold())
+    )
+
+
 def apply_classifiers(
     df: pd.DataFrame,
     rules_path: str | Path | None = None,
@@ -379,31 +395,36 @@ def apply_classifiers(
         if rule.target_column not in out.columns:
             out[rule.target_column] = pd.NA
 
-        mask = _build_rule_mask(
-            out,
-            row_num=row_num,
-            conditions=conditions,
-            match_field=rule.match_field,
-            match_type=rule.match_type,
-            pattern=rule.pattern,
-        )
-
         rule_category = str(rule.category).strip()
         if rule_category and rule_category != "*":
-            if category_column not in out.columns:
-                raise ValueError(
-                    f"Rule row {row_num} has category filter '{rule_category}', "
-                    f"but dataframe has no '{category_column}' column."
-                )
-            cat_mask = (
-                out[category_column]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.casefold()
-                .eq(rule_category.casefold())
+            category_mask = _build_category_mask(
+                out,
+                row_num=row_num,
+                category_column=category_column,
+                rule_category=rule_category,
             )
-            mask = mask & cat_mask
+            if category_mask.any():
+                match_mask = _build_rule_mask(
+                    out.loc[category_mask],
+                    row_num=row_num,
+                    conditions=conditions,
+                    match_field=rule.match_field,
+                    match_type=rule.match_type,
+                    pattern=rule.pattern,
+                )
+                mask = pd.Series(False, index=out.index)
+                mask.loc[category_mask] = match_mask.to_numpy(dtype=bool)
+            else:
+                mask = pd.Series(False, index=out.index)
+        else:
+            mask = _build_rule_mask(
+                out,
+                row_num=row_num,
+                conditions=conditions,
+                match_field=rule.match_field,
+                match_type=rule.match_type,
+                pattern=rule.pattern,
+            )
 
         candidate_rows = int(mask.sum())
         if _rule_uses_otherwise(rule.match_type, conditions):

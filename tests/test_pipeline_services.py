@@ -325,6 +325,56 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(int(report.iloc[0]["applied_rows"]), 1)
             self.assertEqual(result["Подкатегория"].fillna("").tolist(), ["Literal", ""])
 
+    def test_category_prefilter_uses_category_changed_by_previous_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;Мыло хозяйственное;Категория;Категория;equals;Мыло хозяйственное;Мыло;overwrite;;",
+                        "1;2;Мыло;Подкатегория;Название;contains;жидк;Жидкое;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame(
+                [
+                    {"Категория": "Мыло хозяйственное", "Название": "Жидкое хозяйственное мыло"},
+                ]
+            )
+
+            result, report = apply_classifiers(frame, rules_file)
+
+            self.assertEqual(report["applied_rows"].tolist(), [1, 1])
+            self.assertEqual(result.iloc[0]["Категория"], "Мыло")
+            self.assertEqual(result.iloc[0]["Подкатегория"], "Жидкое")
+
+    def test_category_prefilter_skips_match_when_no_candidate_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;Мясо;Подкатегория;Название;regex;.*;Мясо;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame([{"Категория": "Мыло", "Название": "Жидкое мыло"}])
+
+            with patch("classifiers.engine._build_match_mask", side_effect=AssertionError("match should be skipped")):
+                result, report = apply_classifiers(frame, rules_file)
+
+            self.assertEqual(int(report.iloc[0]["candidate_rows"]), 0)
+            self.assertEqual(int(report.iloc[0]["applied_rows"]), 0)
+            self.assertTrue(result["Подкатегория"].isna().all())
+
     def test_default_meat_rules_follow_reference_categories(self) -> None:
         cases = [
             ("Котлеты Три мяса Слово Мясника, 360 г", "Кулинария"),
