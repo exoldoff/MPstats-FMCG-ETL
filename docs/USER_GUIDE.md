@@ -766,6 +766,41 @@ classifiers/rules.csv
 
 Итоговый CSV при этом сохраняет пользовательские расчётные и классификационные колонки, включая `Объем, т`, `Цена за кг`, `Подкатегория`, `Тип`, `Вид мяса` и другие колонки, которые создали правила.
 
+### Аудит производительности классификатора
+
+Для диагностики медленной классификации есть отдельные скрипты. Они не меняют правила и production-логику, а создают benchmark-файлы в локальной папке:
+
+```text
+data/classifier_benchmark/
+```
+
+Быстрый профиль на mock-данных:
+
+```bash
+python3 scripts/profile_classifier.py --all-sizes
+```
+
+Benchmark на mock-данных и маленьком реальном sample, если в `data/projects` есть processed CSV:
+
+```bash
+python3 scripts/benchmark_classifier.py run --all-sizes
+```
+
+Большой запуск на 500 000 строк защищён отдельным флагом:
+
+```bash
+python3 scripts/profile_classifier.py --size large --include-large
+python3 scripts/benchmark_classifier.py run --size large --include-large
+```
+
+Для проверки, что оптимизация не изменила классификацию, сравните старый и новый classified CSV:
+
+```bash
+python3 scripts/benchmark_classifier.py compare old_classified.csv new_classified.csv
+```
+
+Итоговый аудит текущего состояния описан в `CLASSIFIER_PERFORMANCE_AUDIT.md`.
+
 ## 13.1. Вкладка `Проекты`
 
 Эта вкладка показывает все проекты, которые приложение видит в локальной БД и в папке `data/projects`.

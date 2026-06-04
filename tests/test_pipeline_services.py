@@ -18,6 +18,7 @@ from pipeline.services.enrich_service import (
 )
 from pipeline.services.merge_service import merge_csv_files_with_duckdb, merge_dataframes, merge_directory
 from pipeline.services.run_service import parse_steps
+from scripts.classifier_perf_utils import classifier_sizes_for_args, compare_classified_outputs
 from scripts.duckdb_benchmark import merge_sizes_for_args
 
 
@@ -153,6 +154,50 @@ class PipelineServicesTest(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             merge_sizes_for_args(size="large", all_sizes=False, include_large_merge=False)
+
+    def test_classifier_benchmark_large_requires_explicit_flag(self) -> None:
+        self.assertEqual(
+            classifier_sizes_for_args(size="small", all_sizes=True, include_large=False),
+            ["small", "medium"],
+        )
+        self.assertEqual(
+            classifier_sizes_for_args(size="small", all_sizes=True, include_large=True),
+            ["small", "medium", "large"],
+        )
+        with self.assertRaises(ValueError):
+            classifier_sizes_for_args(size="large", all_sizes=False, include_large=False)
+
+    def test_classifier_output_comparison_reports_differences(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            baseline = root / "baseline.csv"
+            candidate = root / "candidate.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"Категория": "Мясо", "Подкатегория": "Кулинария", "Тип": "Котлеты"},
+                        {"Категория": "Мясо", "Подкатегория": "Прочее", "Тип": ""},
+                    ]
+                ),
+                baseline,
+            )
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"Категория": "Мясо", "Подкатегория": "Кулинария", "Тип": "Котлеты"},
+                        {"Категория": "Мясо", "Подкатегория": "Маринады", "Тип": ""},
+                    ]
+                ),
+                candidate,
+            )
+
+            comparison = compare_classified_outputs(baseline, candidate, columns=["Подкатегория", "Тип"])
+
+            self.assertTrue(comparison["row_count_match"])
+            self.assertTrue(comparison["columns_match"])
+            self.assertEqual(comparison["diff_counts"]["Подкатегория"], 1)
+            self.assertEqual(comparison["diff_counts"]["Тип"], 0)
+            self.assertEqual(comparison["first_differences"][0]["row_index"], 1)
 
     def test_classify_file_applies_rules_and_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
