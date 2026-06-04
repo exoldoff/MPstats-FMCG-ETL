@@ -14,7 +14,16 @@ from uuid import uuid4
 
 import pandas as pd
 
-from pipeline.repositories.sql_repository import apply_migrations, connect, quote_identifier, sql_literal, table_exists
+from pipeline.repositories.sql_repository import (
+    apply_migrations,
+    connect,
+    duckdb_transaction,
+    measure_duckdb_operation,
+    quote_identifier,
+    resolve_duckdb_temp_directory,
+    sql_literal,
+    table_exists,
+)
 
 from mpstats_app.config import AppSettings
 from mpstats_app.utils import clean_record, clean_records, quote_duckdb_name
@@ -327,19 +336,37 @@ class DuckDbAppRepository:
         self.settings = settings
         self._lock = RLock()
 
+    def _duckdb_temp_directory(self) -> Path | None:
+        return resolve_duckdb_temp_directory(fallback_directory=self.settings.project_root / "data" / "duckdb_tmp")
+
     def ensure_ready(self) -> None:
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
 
-    def _fetch_records(self, query: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
-        with self._lock, connect(self.settings.db_path) as con:
-            apply_migrations(con)
+    def _fetch_records(
+        self,
+        query: str,
+        params: list[Any] | None = None,
+        *,
+        read_only: bool = False,
+        temp_directory: Path | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock, connect(self.settings.db_path, read_only=read_only, temp_directory=temp_directory) as con:
+            if not read_only:
+                apply_migrations(con)
             result = con.execute(query, params or [])
             columns = [col[0] for col in result.description]
             return clean_records([dict(zip(columns, row)) for row in result.fetchall()])
 
-    def _fetch_one(self, query: str, params: list[Any] | None = None) -> dict[str, Any] | None:
-        rows = self._fetch_records(query, params)
+    def _fetch_one(
+        self,
+        query: str,
+        params: list[Any] | None = None,
+        *,
+        read_only: bool = False,
+        temp_directory: Path | None = None,
+    ) -> dict[str, Any] | None:
+        rows = self._fetch_records(query, params, read_only=read_only, temp_directory=temp_directory)
         return rows[0] if rows else None
 
     def create_run(
@@ -1510,53 +1537,54 @@ class DuckDbAppRepository:
     ) -> int:
         quoted_table = quote_identifier(table_name)
         stage_table = "_mpstats_app_products_stage"
-        with self._lock, connect(self.settings.db_path) as con:
-            apply_migrations(con)
-            con.execute("BEGIN")
-            try:
-                stage_columns = _create_products_stage(
-                    con,
-                    csv_path=csv_path,
-                    stage_table=stage_table,
-                    run_id=run_id,
-                    source_file=str(csv_path),
-                    project_name=project_name,
-                )
-                rows_loaded = _stage_count(con, stage_table)
-                exists = table_exists(con, table_name)
-                if not exists:
-                    con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
-                else:
-                    target_types = _ensure_table_accepts_stage_columns(
+        rows_loaded = 0
+        with measure_duckdb_operation(
+            "import_products_file",
+            {"db_path": self.settings.db_path, "file_path": csv_path, "table_name": table_name, "project_name": project_name},
+        ) as metrics:
+            with self._lock, connect(self.settings.db_path, temp_directory=self._duckdb_temp_directory()) as con:
+                apply_migrations(con)
+                with duckdb_transaction(con):
+                    stage_columns = _create_products_stage(
                         con,
-                        table_name=table_name,
-                        quoted_table=quoted_table,
+                        csv_path=csv_path,
                         stage_table=stage_table,
-                        stage_columns=stage_columns,
+                        run_id=run_id,
+                        source_file=str(csv_path),
+                        project_name=project_name,
                     )
-                    con.execute(
-                        _insert_stage_sql(
+                    rows_loaded = _stage_count(con, stage_table)
+                    exists = table_exists(con, table_name)
+                    if not exists:
+                        con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
+                    else:
+                        target_types = _ensure_table_accepts_stage_columns(
+                            con,
+                            table_name=table_name,
                             quoted_table=quoted_table,
                             stage_table=stage_table,
-                            columns=stage_columns,
-                            target_types=target_types,
-                            deduplicate=False,
+                            stage_columns=stage_columns,
                         )
-                    )
+                        con.execute(
+                            _insert_stage_sql(
+                                quoted_table=quoted_table,
+                                stage_table=stage_table,
+                                columns=stage_columns,
+                                target_types=target_types,
+                                deduplicate=False,
+                            )
+                        )
 
-                con.execute(
-                    """
-                    INSERT INTO pipeline_loads (
-                        table_name, source_file, load_name, project_name, mode, rows_loaded
+                    con.execute(
+                        """
+                        INSERT INTO pipeline_loads (
+                            table_name, source_file, load_name, project_name, mode, rows_loaded
+                        )
+                        VALUES (?, ?, ?, ?, 'append', ?)
+                        """,
+                        [table_name, str(csv_path), load_name or f"app_run:{run_id}", project_name, rows_loaded],
                     )
-                    VALUES (?, ?, ?, ?, 'append', ?)
-                    """,
-                    [table_name, str(csv_path), load_name or f"app_run:{run_id}", project_name, rows_loaded],
-                )
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
-                raise
+            metrics["rows_affected"] = rows_loaded
         return rows_loaded
 
     def import_products_file_idempotent(
@@ -1576,76 +1604,85 @@ class DuckDbAppRepository:
         quoted_table = quote_identifier(table_name)
         inserted = 0
         stage_table = "_mpstats_app_products_stage"
-        with self._lock, connect(self.settings.db_path) as con:
-            apply_migrations(con)
-            con.execute("BEGIN")
-            try:
-                stage_columns = _create_products_stage(
-                    con,
-                    csv_path=csv_path,
-                    stage_table=stage_table,
-                    run_id=run_id,
-                    source_file=str(csv_path),
-                    project_name=project_name,
-                    year=int(year),
-                    month=int(month),
-                    marketplace_code=marketplace_code,
-                    category_key=category_key,
-                )
-                exists = table_exists(con, table_name)
-                if not exists:
-                    con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
-                    inserted = _stage_count(con, stage_table)
-                else:
-                    target_types = _ensure_table_accepts_stage_columns(
+        with measure_duckdb_operation(
+            "import_products_file_idempotent",
+            {
+                "db_path": self.settings.db_path,
+                "file_path": csv_path,
+                "table_name": table_name,
+                "project_name": project_name,
+                "year": int(year),
+                "month": int(month),
+                "marketplace_code": marketplace_code,
+                "category_key": category_key,
+            },
+        ) as metrics:
+            with self._lock, connect(self.settings.db_path, temp_directory=self._duckdb_temp_directory()) as con:
+                apply_migrations(con)
+                with duckdb_transaction(con):
+                    stage_columns = _create_products_stage(
                         con,
-                        table_name=table_name,
-                        quoted_table=quoted_table,
+                        csv_path=csv_path,
                         stage_table=stage_table,
-                        stage_columns=stage_columns,
+                        run_id=run_id,
+                        source_file=str(csv_path),
+                        project_name=project_name,
+                        year=int(year),
+                        month=int(month),
+                        marketplace_code=marketplace_code,
+                        category_key=category_key,
                     )
-                    con.execute(
-                        f"""
-                        DELETE FROM {quoted_table}
-                        WHERE {quote_duckdb_name('__project_name')} = ?
-                          AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
-                          AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
-                          AND {quote_duckdb_name('__marketplace_code')} = ?
-                          AND {quote_duckdb_name('__category_key')} = ?
-                        """,
-                        [project_name, int(year), int(month), marketplace_code, category_key],
-                    )
-                    inserted = _stage_count(con, stage_table)
-                    con.execute(
-                        _insert_stage_sql(
+                    exists = table_exists(con, table_name)
+                    if not exists:
+                        con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
+                        inserted = _stage_count(con, stage_table)
+                    else:
+                        target_types = _ensure_table_accepts_stage_columns(
+                            con,
+                            table_name=table_name,
                             quoted_table=quoted_table,
                             stage_table=stage_table,
-                            columns=stage_columns,
-                            target_types=target_types,
-                            deduplicate=False,
+                            stage_columns=stage_columns,
                         )
-                    )
+                        con.execute(
+                            f"""
+                            DELETE FROM {quoted_table}
+                            WHERE {quote_duckdb_name('__project_name')} = ?
+                              AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
+                              AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
+                              AND {quote_duckdb_name('__marketplace_code')} = ?
+                              AND {quote_duckdb_name('__category_key')} = ?
+                            """,
+                            [project_name, int(year), int(month), marketplace_code, category_key],
+                        )
+                        inserted = _stage_count(con, stage_table)
+                        con.execute(
+                            _insert_stage_sql(
+                                quoted_table=quoted_table,
+                                stage_table=stage_table,
+                                columns=stage_columns,
+                                target_types=target_types,
+                                deduplicate=False,
+                            )
+                        )
 
-                con.execute(
-                    """
-                    INSERT INTO pipeline_loads (
-                        table_name, source_file, load_name, project_name, mode, rows_loaded
+                    con.execute(
+                        """
+                        INSERT INTO pipeline_loads (
+                            table_name, source_file, load_name, project_name, mode, rows_loaded
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            table_name,
+                            str(csv_path),
+                            load_name or f"smart_pipeline:{run_id}",
+                            project_name,
+                            "replace" if overwrite else "replace_slice",
+                            inserted,
+                        ],
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        table_name,
-                        str(csv_path),
-                        load_name or f"smart_pipeline:{run_id}",
-                        project_name,
-                        "replace" if overwrite else "replace_slice",
-                        inserted,
-                    ],
-                )
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
-                raise
+            metrics["rows_affected"] = inserted
         return inserted
 
     def search_products(
@@ -1702,10 +1739,11 @@ class DuckDbAppRepository:
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
 
-        count_row = self._fetch_one(f"SELECT COUNT(*) AS total FROM {quoted_table}{where_sql}", params)
+        count_row = self._fetch_one(f"SELECT COUNT(*) AS total FROM {quoted_table}{where_sql}", params, read_only=True)
         rows = self._fetch_records(
             f"SELECT * FROM {quoted_table}{where_sql}{order_sql} LIMIT {safe_limit} OFFSET {safe_offset}",
             params,
+            read_only=True,
         )
         return {
             "columns": columns,
@@ -1849,7 +1887,12 @@ class DuckDbAppRepository:
             period_from_index=period_from_index,
             period_to_index=period_to_index,
         )
-        row = self._fetch_one(f"SELECT COUNT(*) AS total FROM ({query}) report_rows", params)
+        row = self._fetch_one(
+            f"SELECT COUNT(*) AS total FROM ({query}) report_rows",
+            params,
+            read_only=True,
+            temp_directory=self._duckdb_temp_directory(),
+        )
         return int(row["total"]) if row else 0
 
     def fetch_report_dataframe(
@@ -1875,8 +1918,7 @@ class DuckDbAppRepository:
         if limit is not None:
             query = f"{query} LIMIT ? OFFSET ?"
             params = [*params, max(1, int(limit)), max(0, int(offset))]
-        with self._lock, connect(self.settings.db_path) as con:
-            apply_migrations(con)
+        with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
             return con.execute(query, params).fetchdf()
 
     def export_query_to_csv(
@@ -1894,22 +1936,27 @@ class DuckDbAppRepository:
         execute_params = _normalize_query_params(params)
         started = time.perf_counter()
         try:
-            with self._lock, connect(self.settings.db_path) as con:
-                apply_migrations(con)
-                if header:
-                    metadata = con.execute(f"SELECT * FROM ({clean_query}) AS export_source LIMIT 0", execute_params)
-                    columns = [str(item[0]) for item in (metadata.description or [])]
-                    header_prefix = _csv_header_prefix(columns, delimiter=clean_delimiter)
-                    options = (
-                        f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, "
-                        f"PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')"
-                    )
-                else:
-                    options = f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false)"
-                rows = con.execute(
-                    f"COPY ({clean_query}) TO {sql_literal(str(target))} {options}",
-                    execute_params,
-                ).fetchall()
+            with measure_duckdb_operation(
+                "export_query_to_csv",
+                {"db_path": self.settings.db_path, "file_path": target},
+            ) as metrics:
+                with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
+                    if header:
+                        metadata = con.execute(f"SELECT * FROM ({clean_query}) AS export_source LIMIT 0", execute_params)
+                        columns = [str(item[0]) for item in (metadata.description or [])]
+                        header_prefix = _csv_header_prefix(columns, delimiter=clean_delimiter)
+                        options = (
+                            f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, "
+                            f"PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')"
+                        )
+                    else:
+                        options = f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false)"
+                    rows = con.execute(
+                        f"COPY ({clean_query}) TO {sql_literal(str(target))} {options}",
+                        execute_params,
+                    ).fetchall()
+                metrics["rows_exported"] = _copy_row_count(rows)
+                metrics["file_size_bytes"] = target.stat().st_size if target.exists() else 0
         except Exception:
             LOGGER.exception("DuckDB COPY CSV export failed: %s", target)
             raise
@@ -2059,6 +2106,8 @@ class DuckDbAppRepository:
             ORDER BY category_name, marketplace
             """,
             params,
+            read_only=True,
+            temp_directory=self._duckdb_temp_directory(),
         )
 
     def export_breakdown(
@@ -2116,6 +2165,8 @@ class DuckDbAppRepository:
             ORDER BY year, month, category_name, marketplace
             """,
             params,
+            read_only=True,
+            temp_directory=self._duckdb_temp_directory(),
         )
 
     def count_export_products(
@@ -2143,6 +2194,8 @@ class DuckDbAppRepository:
         row = self._fetch_one(
             f"SELECT COUNT(*) AS total FROM {quote_identifier(table_name)}{where_sql}",
             params,
+            read_only=True,
+            temp_directory=self._duckdb_temp_directory(),
         )
         return int(row["total"]) if row else 0
 
@@ -2185,8 +2238,7 @@ class DuckDbAppRepository:
             sort_direction=sort_direction,
             default_order=default_order,
         )
-        with self._lock, connect(self.settings.db_path) as con:
-            apply_migrations(con)
+        with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
             return con.execute(
                 f"""
                 SELECT {select_sql}
@@ -2236,20 +2288,25 @@ class DuckDbAppRepository:
         output_path = Path(target)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         header_prefix = _csv_header_prefix(selected_columns)
-        with self._lock, connect(self.settings.db_path) as con:
-            apply_migrations(con)
-            con.execute(
-                f"""
-                COPY (
-                    SELECT {select_sql}
-                    FROM {quote_identifier(table_name)}
-                    {where_sql}
-                    {order_sql}
-                ) TO {sql_literal(str(output_path))}
-                (FORMAT csv, DELIMITER ';', HEADER false, PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')
-                """,
-                params,
-            )
+        with measure_duckdb_operation(
+            "export_products_to_csv",
+            {"db_path": self.settings.db_path, "file_path": output_path, "table_name": table_name, "project_name": project_name},
+        ) as metrics:
+            with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
+                row = con.execute(
+                    f"""
+                    COPY (
+                        SELECT {select_sql}
+                        FROM {quote_identifier(table_name)}
+                        {where_sql}
+                        {order_sql}
+                    ) TO {sql_literal(str(output_path))}
+                    (FORMAT csv, DELIMITER ';', HEADER false, PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')
+                    """,
+                    params,
+                ).fetchone()
+            metrics["rows_exported"] = int(row[0]) if row else None
+            metrics["file_size_bytes"] = output_path.stat().st_size if output_path.exists() else 0
         return output_path
 
     def _report_query_sql(

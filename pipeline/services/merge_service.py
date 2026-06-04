@@ -13,7 +13,7 @@ import pandas as pd
 
 from pipeline.models import StepResult
 from pipeline.repositories.file_repository import list_csv_files
-from pipeline.repositories.sql_repository import sql_literal
+from pipeline.repositories.sql_repository import duckdb_connection, measure_duckdb_operation, resolve_duckdb_temp_directory, sql_literal
 
 
 MERGE_RENAME_COLUMNS = {
@@ -73,6 +73,10 @@ def merge_csv_files_with_duckdb(
     *,
     min_sales: float = 0,
     max_sales: float = 40_000,
+    duckdb_threads: int | None = None,
+    duckdb_memory_limit: str | None = None,
+    duckdb_temp_directory: Path | None = None,
+    use_env_settings: bool = True,
 ) -> MergeResult:
     started = time.perf_counter()
     paths = [Path(path).expanduser().resolve() for path in input_paths]
@@ -111,71 +115,95 @@ def merge_csv_files_with_duckdb(
     order_sql = "__source_file_index, __source_row_number"
     header_prefix = _csv_header_prefix(output_columns, delimiter=clean_delimiter)
 
-    with duckdb.connect(":memory:") as con:
-        con.execute("SET preserve_insertion_order = true")
-        con.execute(f"CREATE TEMP TABLE merge_stage AS {select_sql}")
-        rows_in = _fetch_int(con, "SELECT COUNT(*) FROM merge_stage")
-        input_file_rows = [
-            {
-                "file": str(paths[int(row[0])]),
-                "rows": int(row[1]),
-            }
-            for row in con.execute(
-                """
-                SELECT __source_file_index, COUNT(*) AS rows_count
-                FROM merge_stage
-                GROUP BY __source_file_index
-                ORDER BY __source_file_index
-                """
-            ).fetchall()
-        ]
-        filtered_rows = _fetch_int(con, f"SELECT COUNT(*) FROM merge_stage WHERE {filter_sql}", [float(min_sales), float(max_sales)])
-        if effective_dedup_columns:
-            partition_sql = ", ".join(_quote_name(column) for column in effective_dedup_columns)
-            con.execute(
-                f"""
-                CREATE TEMP TABLE merge_output AS
-                WITH filtered AS (
+    temp_directory = resolve_duckdb_temp_directory(
+        duckdb_temp_directory,
+        fallback_directory=output.parent / ".duckdb_tmp" if use_env_settings else None,
+        use_env=use_env_settings,
+    )
+    with measure_duckdb_operation(
+        "merge_csv",
+        {
+            "db_path": ":memory:",
+            "file_path": output,
+            "input_files_count": len(paths),
+            "temp_directory": temp_directory,
+        },
+    ) as metrics:
+        with duckdb_connection(
+            ":memory:",
+            threads=duckdb_threads,
+            memory_limit=duckdb_memory_limit,
+            temp_directory=temp_directory,
+            use_env=use_env_settings,
+        ) as con:
+            con.execute("SET preserve_insertion_order = true")
+            con.execute(f"CREATE TEMP TABLE merge_stage AS {select_sql}")
+            rows_in = _fetch_int(con, "SELECT COUNT(*) FROM merge_stage")
+            input_file_rows = [
+                {
+                    "file": str(paths[int(row[0])]),
+                    "rows": int(row[1]),
+                }
+                for row in con.execute(
+                    """
+                    SELECT __source_file_index, COUNT(*) AS rows_count
+                    FROM merge_stage
+                    GROUP BY __source_file_index
+                    ORDER BY __source_file_index
+                    """
+                ).fetchall()
+            ]
+            filtered_rows = _fetch_int(con, f"SELECT COUNT(*) FROM merge_stage WHERE {filter_sql}", [float(min_sales), float(max_sales)])
+            if effective_dedup_columns:
+                partition_sql = ", ".join(_quote_name(column) for column in effective_dedup_columns)
+                con.execute(
+                    f"""
+                    CREATE TEMP TABLE merge_output AS
+                    WITH filtered AS (
+                        SELECT *
+                        FROM merge_stage
+                        WHERE {filter_sql}
+                    ),
+                    ranked AS (
+                        SELECT
+                            *,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY {partition_sql}
+                                ORDER BY {order_sql}
+                            ) AS __dedup_rank
+                        FROM filtered
+                    )
+                    SELECT *
+                    FROM ranked
+                    WHERE __dedup_rank = 1
+                    """,
+                    [float(min_sales), float(max_sales)],
+                )
+            else:
+                con.execute(
+                    f"""
+                    CREATE TEMP TABLE merge_output AS
                     SELECT *
                     FROM merge_stage
                     WHERE {filter_sql}
-                ),
-                ranked AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY {partition_sql}
-                            ORDER BY {order_sql}
-                        ) AS __dedup_rank
-                    FROM filtered
+                    """,
+                    [float(min_sales), float(max_sales)],
                 )
-                SELECT *
-                FROM ranked
-                WHERE __dedup_rank = 1
-                """,
-                [float(min_sales), float(max_sales)],
-            )
-        else:
+            rows_out = _fetch_int(con, "SELECT COUNT(*) FROM merge_output")
             con.execute(
                 f"""
-                CREATE TEMP TABLE merge_output AS
-                SELECT *
-                FROM merge_stage
-                WHERE {filter_sql}
+                COPY (
+                    SELECT {quoted_output_columns}
+                    FROM merge_output
+                    ORDER BY {order_sql}
+                ) TO {sql_literal(str(output))}
+                (FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')
                 """,
-                [float(min_sales), float(max_sales)],
             )
-        rows_out = _fetch_int(con, "SELECT COUNT(*) FROM merge_output")
-        con.execute(
-            f"""
-            COPY (
-                SELECT {quoted_output_columns}
-                FROM merge_output
-                ORDER BY {order_sql}
-            ) TO {sql_literal(str(output))}
-            (FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')
-            """
-        )
+        metrics["rows_in"] = rows_in
+        metrics["rows_exported"] = rows_out
+        metrics["filtered_rows"] = filtered_rows
+        metrics["file_size_bytes"] = output.stat().st_size if output.exists() else 0
 
     return MergeResult(
         output_path=output,

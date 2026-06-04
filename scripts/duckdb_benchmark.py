@@ -22,6 +22,7 @@ try:
 except ModuleNotFoundError:
     from scripts.duckdb_mock_data import DEFAULT_SIZES, generate_mock_csv
 from pipeline.services.merge_service import merge_csv_files_with_duckdb
+from pipeline.repositories.sql_repository import get_duckdb_connection
 
 
 BENCH_SIZE_ORDER = ("small", "medium", "large")
@@ -88,6 +89,32 @@ class MergeBenchResult:
         return self.old_seconds / self.new_seconds
 
 
+@dataclass(frozen=True)
+class SettingsBenchVariant:
+    name: str
+    threads: int | None = None
+    memory_limit: str | None = None
+    temp_directory_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class SettingsBenchResult:
+    variant: str
+    threads: int | None
+    memory_limit: str | None
+    temp_directory_enabled: bool
+    load_csv_seconds: float
+    report_aggregate_seconds: float
+    report_csv_copy_seconds: float
+    merge_csv_seconds: float | None
+    loaded_rows: int
+    report_rows: int
+    report_csv_rows: int
+    merge_output_rows: int | None
+    report_csv_size_bytes: int | None
+    merge_csv_size_bytes: int | None
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -102,16 +129,21 @@ def file_size(path: Path) -> int | None:
     return path.stat().st_size if path.exists() else None
 
 
-def connect(db_path: Path, *, threads: int | None = None, memory_limit: str | None = None, temp_directory: Path | None = None) -> duckdb.DuckDBPyConnection:
-    config: dict[str, str] = {}
-    if threads is not None:
-        config["threads"] = str(max(1, int(threads)))
-    if memory_limit:
-        config["memory_limit"] = memory_limit
-    if temp_directory:
-        temp_directory.mkdir(parents=True, exist_ok=True)
-        config["temp_directory"] = str(temp_directory)
-    return duckdb.connect(str(db_path), config=config or None)
+def connect(
+    db_path: Path,
+    *,
+    threads: int | None = None,
+    memory_limit: str | None = None,
+    temp_directory: Path | None = None,
+    use_env: bool = False,
+) -> duckdb.DuckDBPyConnection:
+    return get_duckdb_connection(
+        db_path,
+        threads=threads,
+        memory_limit=memory_limit,
+        temp_directory=temp_directory,
+        use_env=use_env,
+    )
 
 
 def create_dim_tables(con: duckdb.DuckDBPyConnection) -> None:
@@ -564,6 +596,134 @@ def run_benchmark(
     return results, quality
 
 
+def settings_variants() -> list[SettingsBenchVariant]:
+    return [
+        SettingsBenchVariant("default"),
+        SettingsBenchVariant("threads=1", threads=1),
+        SettingsBenchVariant("threads=4", threads=4),
+        SettingsBenchVariant("memory_limit=2GB", memory_limit="2GB"),
+        SettingsBenchVariant("memory_limit=4GB", memory_limit="4GB"),
+        SettingsBenchVariant("temp_directory", temp_directory_enabled=True),
+    ]
+
+
+def safe_variant_name(name: str) -> str:
+    return (
+        name.lower()
+        .replace("=", "_")
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("-", "_")
+    )
+
+
+def run_settings_benchmark(
+    *,
+    workdir: Path,
+    size: str,
+    rows: int,
+    merge_size: str,
+    include_merge: bool,
+) -> list[SettingsBenchResult]:
+    workdir.mkdir(parents=True, exist_ok=True)
+    csv_path = workdir / f"mock_settings_{size}_{rows}.csv"
+    if not csv_path.exists():
+        generate_mock_csv(csv_path, rows=rows)
+
+    merge_input_paths: list[Path] = []
+    if include_merge:
+        merge_config = MERGE_BENCH_SIZES[merge_size]
+        merge_input_paths = generate_merge_mock_csvs(
+            workdir,
+            size=merge_size,
+            files=int(merge_config["files"]),
+            rows_per_file=int(merge_config["rows_per_file"]),
+        )
+
+    results: list[SettingsBenchResult] = []
+    for variant in settings_variants():
+        variant_slug = safe_variant_name(variant.name)
+        db_path = workdir / f"settings_{variant_slug}.duckdb"
+        if db_path.exists():
+            db_path.unlink()
+        report_csv = workdir / f"settings_report_{variant_slug}.csv"
+        if report_csv.exists():
+            report_csv.unlink()
+        temp_directory = workdir / f"settings_tmp_{variant_slug}" if variant.temp_directory_enabled else None
+
+        with connect(
+            db_path,
+            threads=variant.threads,
+            memory_limit=variant.memory_limit,
+            temp_directory=temp_directory,
+            use_env=False,
+        ) as con:
+            create_dim_tables(con)
+
+            def load_csv() -> int:
+                con.execute(f"CREATE OR REPLACE TABLE products_new AS {stage_select(csv_path)}")
+                return int(con.execute("SELECT COUNT(*) FROM products_new").fetchone()[0])
+
+            load_seconds, loaded_rows = timed(load_csv)
+
+            def report_aggregate() -> int:
+                return len(con.execute(GROUP_QUERY).fetchall())
+
+            aggregate_seconds, report_rows = timed(report_aggregate)
+
+            def report_csv_copy() -> int:
+                row = con.execute(
+                    f"COPY ({REPORT_CSV_QUERY}) TO {sql_literal(str(report_csv))} "
+                    "WITH (FORMAT csv, DELIMITER ';', HEADER true)"
+                ).fetchone()
+                return int(row[0]) if row else 0
+
+            copy_seconds, report_csv_rows = timed(report_csv_copy)
+
+        merge_seconds: float | None = None
+        merge_output_rows: int | None = None
+        merge_csv_size_bytes: int | None = None
+        if include_merge:
+            merge_output = workdir / f"settings_merge_{variant_slug}_{merge_size}.csv"
+            if merge_output.exists():
+                merge_output.unlink()
+            merge_temp_directory = temp_directory / "merge" if temp_directory is not None else None
+            merge_result = merge_csv_files_with_duckdb(
+                merge_input_paths,
+                merge_output,
+                duckdb_threads=variant.threads,
+                duckdb_memory_limit=variant.memory_limit,
+                duckdb_temp_directory=merge_temp_directory,
+                use_env_settings=False,
+            )
+            merge_seconds = merge_result.duration_seconds
+            merge_output_rows = merge_result.rows_out
+            merge_csv_size_bytes = merge_result.file_size_bytes
+
+        results.append(
+            SettingsBenchResult(
+                variant=variant.name,
+                threads=variant.threads,
+                memory_limit=variant.memory_limit,
+                temp_directory_enabled=variant.temp_directory_enabled,
+                load_csv_seconds=load_seconds,
+                report_aggregate_seconds=aggregate_seconds,
+                report_csv_copy_seconds=copy_seconds,
+                merge_csv_seconds=merge_seconds,
+                loaded_rows=int(loaded_rows or 0),
+                report_rows=int(report_rows or 0),
+                report_csv_rows=int(report_csv_rows or 0),
+                merge_output_rows=merge_output_rows,
+                report_csv_size_bytes=file_size(report_csv),
+                merge_csv_size_bytes=merge_csv_size_bytes,
+            )
+        )
+        if temp_directory is not None:
+            shutil.rmtree(temp_directory, ignore_errors=True)
+
+    return results
+
+
 def markdown_table(results: list[BenchResult]) -> str:
     lines = [
         "| operation | old method | new method | before, s | after, s | speedup | rows | old bytes | new bytes | comment | risk |",
@@ -629,6 +789,45 @@ def merge_markdown_table(results: list[MergeBenchResult]) -> str:
     return "\n".join(lines)
 
 
+def settings_markdown_table(results: list[SettingsBenchResult]) -> str:
+    default_total = None
+    for item in results:
+        if item.variant == "default":
+            default_total = item.load_csv_seconds + item.report_aggregate_seconds + item.report_csv_copy_seconds + (item.merge_csv_seconds or 0)
+            break
+    lines = [
+        "| variant | threads | memory_limit | temp dir | load CSV, s | report aggregate, s | report CSV COPY, s | merge CSV, s | total, s | speedup vs default | rows loaded | report rows | merge rows |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in results:
+        total = item.load_csv_seconds + item.report_aggregate_seconds + item.report_csv_copy_seconds + (item.merge_csv_seconds or 0)
+        speedup = "-" if not default_total or total <= 0 else f"{default_total / total:.2f}x"
+        merge_seconds = "-" if item.merge_csv_seconds is None else f"{item.merge_csv_seconds:.4f}"
+        merge_rows = "-" if item.merge_output_rows is None else str(item.merge_output_rows)
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    item.variant,
+                    "-" if item.threads is None else str(item.threads),
+                    "-" if item.memory_limit is None else item.memory_limit,
+                    "yes" if item.temp_directory_enabled else "no",
+                    f"{item.load_csv_seconds:.4f}",
+                    f"{item.report_aggregate_seconds:.4f}",
+                    f"{item.report_csv_copy_seconds:.4f}",
+                    merge_seconds,
+                    f"{total:.4f}",
+                    speedup,
+                    str(item.loaded_rows),
+                    str(item.report_csv_rows),
+                    merge_rows,
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
 def merge_sizes_for_args(*, size: str, all_sizes: bool, include_large_merge: bool) -> list[str]:
     if all_sizes:
         sizes = ["small", "medium"]
@@ -651,6 +850,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--all-sizes", action="store_true", help="Run small, medium and large sizes in one pass.")
     parser.add_argument("--merge-only", action="store_true", help="Run only merge CSV benchmark.")
     parser.add_argument("--include-large-merge", action="store_true", help="Allow the large merge benchmark.")
+    parser.add_argument("--settings-only", action="store_true", help="Run DuckDB settings benchmark: default, threads, memory_limit and temp_directory.")
+    parser.add_argument("--settings-merge-size", choices=sorted(MERGE_BENCH_SIZES), default="medium", help="Merge dataset size for --settings-only.")
+    parser.add_argument("--settings-skip-merge", action="store_true", help="Skip merge operation inside --settings-only.")
     return parser.parse_args()
 
 
@@ -674,10 +876,46 @@ def write_outputs(*, workdir: Path, size: str, rows: int, results: list[BenchRes
     return report
 
 
+def write_settings_outputs(*, workdir: Path, size: str, rows: int, merge_size: str, results: list[SettingsBenchResult]) -> str:
+    payload = {
+        "benchmark": "duckdb_settings",
+        "size": size,
+        "rows": rows,
+        "merge_size": merge_size,
+        "results": [item.__dict__ for item in results],
+    }
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "settings_benchmark.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report = settings_markdown_table(results)
+    (workdir / "settings_benchmark.md").write_text(report + "\n", encoding="utf-8")
+    return report
+
+
 def main() -> None:
     args = parse_args()
     if args.all_sizes and args.rows is not None:
         raise ValueError("--rows нельзя использовать вместе с --all-sizes.")
+    if args.settings_only:
+        if args.all_sizes:
+            raise ValueError("--settings-only запускается для одного --size.")
+        rows = int(args.rows if args.rows is not None else DEFAULT_SIZES[args.size])
+        results = run_settings_benchmark(
+            workdir=args.workdir,
+            size=args.size,
+            rows=rows,
+            merge_size=args.settings_merge_size,
+            include_merge=not args.settings_skip_merge,
+        )
+        report = write_settings_outputs(
+            workdir=args.workdir,
+            size=args.size,
+            rows=rows,
+            merge_size=args.settings_merge_size,
+            results=results,
+        )
+        print(f"\n## DuckDB settings: {args.size}, {rows:,} rows")
+        print(report)
+        return
     if args.merge_only:
         if args.rows is not None:
             raise ValueError("--rows не применяется к --merge-only; размеры merge benchmark фиксированы.")
