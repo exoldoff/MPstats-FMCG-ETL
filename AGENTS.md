@@ -22,12 +22,12 @@
 - Бизнес-логика должна жить в сервисах.
 - Работа с файлами, SQL и другими хранилищами должна быть вынесена в repositories/data layer.
 - Не смешивай UI-логику с domain-логикой.
-- Для этого проекта главный legacy-flow сейчас находится в ноутбуке `MPstats_export_yearmonnth_v1.3_pipeline.ipynb`; при доработках выноси новую переиспользуемую логику в Python-модули рядом с `pipeline/` или `classifiers/`.
+- Единственный пользовательский интерфейс проекта — локальная web-app `mpstats_app/` + `web/`. Не добавляй новые CLI, notebook или отдельные desktop-GUI сценарии без явного запроса.
 - Для web-app не заставляй пользователя редактировать сырой JSON/CSV, если можно дать нормальную форму. CRUD правил и справочников держи в services/data layer, routes оставляй тонкими.
 
 ## Источники правды
 
-- Основной пайплайн: `MPstats_export_yearmonnth_v1.3_pipeline.ipynb`.
+- Основной пользовательский workflow: локальная web-app `mpstats_app/` + `web/`.
 - Индекс для агентов: `docs/AI_INDEX.md`.
 - Человеческий вход в проект: `README.md`.
 - Пользовательская инструкция: `docs/USER_GUIDE.md`.
@@ -35,7 +35,7 @@
 - Синтаксис фильтров MPStats: `filter.md`.
 - Архив задач: `справочник tasks архив.md`.
 - Handbook для обновления `TASKS`: `.cursor/agents/mpstats-tasks-handbook.md`.
-- Шаблон настроек выгрузки: `pipeline/step1_export_config.example.json`; локальный `pipeline/step1_export_config.json` игнорируется, потому что в нём может быть cookie.
+- Настройки web workflow: `mpstats_app/api/settings.py`, `mpstats_app/services/project_service.py`, `pipeline/step1_config.py`; локальный `pipeline/step1_export_config.json` игнорируется, потому что в нём может быть cookie.
 - Правила классификации: `classifiers/rules.csv`; основной редактор теперь вкладка `Классификатор` в локальной web-app.
 - Локальное приложение: `mpstats_app/` + `web/`; справочник и правила редактируются через web UI и сохраняются обратно в CSV.
 
@@ -55,7 +55,6 @@
 - Запускай самый узкий релевантный тест или проверку.
 - Для классификатора проверяй импорт/compile модулей `classifiers`.
 - Для конфигов шага 1 проверяй импорт/compile модулей `pipeline`.
-- Для notebook-логики указывай, какие шаги ноутбука надо перезапустить вручную.
 - Если тесты не запускались, честно напиши почему и что запустить вручную.
 
 ## Финальный ответ

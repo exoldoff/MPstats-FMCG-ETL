@@ -16,10 +16,11 @@ def make_service(root: Path) -> DataQualityService:
 
 
 def write_quality_csv(root: Path, project_name: str, rows: list[dict[str, object]], *, classified: bool = True) -> Path:
-    pipeline_dir = root / "pipeline"
-    pipeline_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_merged_classified.csv" if classified else "_merged.csv"
-    path = pipeline_dir / f"03_{project_name}{suffix}"
+    folder = "processed" if classified else "merged"
+    suffix = "_classified.csv" if classified else ".csv"
+    project_dir = root / "data" / "projects" / project_name / folder
+    project_dir.mkdir(parents=True, exist_ok=True)
+    path = project_dir / f"{project_name}{suffix}"
     write_semicolon_csv(pd.DataFrame(rows), path)
     return path
 

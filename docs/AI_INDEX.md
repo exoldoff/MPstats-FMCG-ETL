@@ -16,7 +16,7 @@
 | `AGENTS.md` | источник правил | всегда перед работой |
 | `README.md` | краткий обзор | запуск, структура, состояние проекта |
 | `docs/AI_INDEX.md` | индекс для агентов | всегда после `AGENTS.md` |
-| `docs/USER_GUIDE.md` | пользовательская инструкция | изменения UI, workflow, расчётов, статусов, справочника, классификатора |
+| `docs/USER_GUIDE.md` | пользовательская инструкция web-app | изменения UI, workflow, расчётов, статусов, справочника, классификатора |
 | `filter.md` | справочник MPStats-фильтров | задачи с `filterModel` и CSV-колонкой `Фильтр` |
 | `.cursor/agents/mpstats-tasks-handbook.md` | узкий handbook | обновление `TASKS` из CSV-справочника |
 | `справочник tasks архив.md` | append-only архив | после обновления `TASKS`, только дописывать недостающие задачи |
@@ -27,59 +27,36 @@
 
 | Зона | Файлы | Когда читать |
 | --- | --- | --- |
-| Notebook UI | `MPstats_export_yearmonnth_v1.3_pipeline.ipynb` | Основной удобный интерфейс пользователя |
-| CLI | `pipeline/cli.py`, `pipeline/services/run_service.py` | Автоматизированный запуск без Jupyter |
 | Документация | `README.md`, `docs/USER_GUIDE.md` | Общий вход и пользовательские сценарии |
-| Настройки выгрузки | `pipeline/step1_export_config.example.json`, локальный `pipeline/step1_export_config.json`, `pipeline/step1_config.py`, `pipeline/step1_gui.py` | Периоды, cookie, TASKS, GUI шага 1 |
+| Web-app | `mpstats_app/`, `web/`, `docs/USER_GUIDE.md` | Единственный пользовательский интерфейс и запуск программы |
+| Настройки выгрузки | `pipeline/step1_config.py`, `mpstats_app/api/settings.py`, `mpstats_app/services/project_service.py` | Cookie, текущий проект и настройки web workflow |
 | Категории | `Справочник категорий MP STATS.csv`, `filter.md`, `.cursor/agents/mpstats-tasks-handbook.md`, `справочник tasks архив.md` | Добавление или синхронизация TASKS |
-| Классификация | `classifiers/rules.csv`, `classifiers/engine.py`, `classifiers/gui.py`, `mpstats_app/services/classifier_rules_service.py` | Правила, GUI и движок классификатора |
-| Локальная web-app | `mpstats_app/`, `web/`, `docs/USER_GUIDE.md` | Smart pipeline, manifest, CRUD справочника и классификатора |
-| Сервисы шагов | `pipeline/services/` | Основная бизнес-логика программы |
+| Классификация | `classifiers/rules.csv`, `classifiers/engine.py`, `mpstats_app/services/classifier_rules_service.py` | Правила web-редактора и движок классификатора |
+| Сервисы шагов | `pipeline/services/` | Внутренняя бизнес-логика, вызываемая web-app |
 | Файловый слой | `pipeline/repositories/` | Чтение/запись CSV/JSON |
-| SQL-хранилище | `pipeline/repositories/sql_repository.py`, `pipeline/services/sql_service.py`, `pipeline/migrations/` | Загрузка/выгрузка данных через DuckDB |
+| SQL-хранилище | `pipeline/repositories/sql_repository.py`, `pipeline/services/sql_service.py`, `pipeline/migrations/`, `mpstats_app/repositories/duckdb_repository.py` | DuckDB-хранилище web-app |
 | Web API | `mpstats_app/api/`, `mpstats_app/schemas.py`, `tests/test_web_api.py` | Backend routes, схемы, API-регрессии |
-| Рабочие данные | `pipeline/01_*`, `pipeline/02_*`, `pipeline/03_*`, `pipeline/04_*`, `Архив выгрузок/` | Проверка конкретных выгрузок и отчётов |
+| Рабочие данные | `data/projects/`, `mpstats.duckdb` | Проверка конкретных web-выгрузок и отчётов |
 
 ## Текущий поток данных
 
 ```text
 MPStats API
-  -> pipeline/01_step1_raw/
-  -> pipeline/02_step2_enriched/
-  -> pipeline/03_step3_standardized/
-  -> pipeline/04_step4_parsed/
-  -> pipeline/03_<project>_merged.csv
-  -> pipeline/03_<project>_merged_classified.csv
-```
-
-Smart workflow web-app дополнительно ведёт manifest и куб:
-
-```text
+  -> data/projects/{project}/raw
+  -> data/projects/{project}/processed
+  -> data/projects/{project}/merged
+  -> data/projects/{project}/exports
 Справочник категорий MP STATS.csv
   -> план задач marketplace + category + year + month
-  -> data/projects/{project}/raw|processed|merged
   -> mpstats.duckdb / cube_registry / mpstats_products
 ```
 
 ## Быстрые команды
 
-Установка зависимостей:
+Установка Python-зависимостей:
 
 ```bash
 python3 -m pip install -r requirements.txt
-```
-
-GUI настроек выгрузки:
-
-```bash
-test -f pipeline/step1_export_config.json || cp pipeline/step1_export_config.example.json pipeline/step1_export_config.json
-python3 -m pipeline.step1_gui --config "pipeline/step1_export_config.json" --archive "справочник tasks архив.md"
-```
-
-GUI правил классификации:
-
-```bash
-python3 -m classifiers.gui
 ```
 
 Локальная web-app одним ярлыком:
@@ -94,24 +71,10 @@ Windows без Node.js:
 "MPStats Local App.bat"
 ```
 
-Запуск программы без Jupyter:
-
-```bash
-python3 -m pipeline.cli run --steps 2-6 --project-name "Мясо 05_18"
-```
-
-SQL:
-
-```bash
-python3 -m pipeline.cli sql-import --project-name "Мясо 05_18" --table mpstats_products
-python3 -m pipeline.cli sql-export --table mpstats_products --output pipeline/sql_export.csv
-python3 -m pipeline.cli sql-query --tables
-```
-
 Проверка импортируемых Python-модулей:
 
 ```bash
-python3 -m compileall pipeline classifiers
+python3 -m compileall pipeline classifiers mpstats_app
 ```
 
 Узкая проверка web API:
@@ -133,8 +96,7 @@ python3 -m pytest tests/test_web_api.py
 
 ## Что уже есть
 
-- `pyproject.toml` и `requirements.txt` для зависимостей.
-- CLI `pipeline.cli` и scripts `mpstats-pipeline`, `mpstats-app`.
+- `pyproject.toml` и `requirements.txt` для зависимостей web-app.
 - Сервисы шагов 1-6 в `pipeline/services/`.
 - Data layer в `pipeline/repositories/` и DuckDB-миграции в `pipeline/migrations/`.
 - Локальная FastAPI + React web-app с редактором справочника и классификатора.
@@ -150,13 +112,12 @@ python3 -m pytest tests/test_web_api.py
 
 ## Риски текущей структуры
 
-- Ноутбук должен оставаться тонким UI: параметры и вызовы сервисов, без дублирования бизнес-логики.
 - Рабочие данные, исторические выгрузки и код лежат рядом; важно не коммитить лишние артефакты.
 - Воспроизводимое окружение уже зафиксировано, но локальные рабочие данные всё ещё легко случайно смешать с кодовым diff.
-- Пути и названия проектов частично живут в пользовательских настройках и notebook-flow, поэтому переносимость зависит от аккуратной конфигурации.
+- Пути и названия проектов живут в настройках web-app и локальной DuckDB, поэтому переносимость зависит от аккуратной конфигурации.
 
 ## Рекомендуемый принцип изменений
 
-Для новых доработок сначала выноси логику в маленький модуль с тестируемыми функциями, а ноутбук оставляй тонким запускателем. GUI должен редактировать конфиг и вызывать сервисы, а не становиться вторым местом бизнес-логики.
+Для новых доработок сначала выноси логику в маленький модуль с тестируемыми функциями, а web routes оставляй тонкими: routes принимают/отдают данные, сервисы выполняют workflow, repositories работают с файлами и DuckDB.
 
 В локальной web-app справочник категорий редактируется через вкладку `Справочник` и сохраняется только в CSV `Справочник категорий MP STATS.csv`; Excel-дубликаты не являются источником. Правила классификатора редактируются через вкладку `Классификатор`, которая пишет `classifiers/rules.csv` без ручного ввода JSON.

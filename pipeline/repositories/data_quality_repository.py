@@ -65,54 +65,13 @@ class DataQualityRepository:
     def _discover_sources(self) -> dict[str, QualityDataSource]:
         sources: dict[str, QualityDataSource] = {}
 
-        legacy = self._legacy_sources()
-        sources.update(legacy)
-
         for project_dir in self._iter_project_dirs():
             project_name = project_dir.name
-            if project_name in sources:
-                continue
             source = self._project_files_source(project_name, project_dir)
             if source is not None:
                 sources[project_name] = source
 
         return sources
-
-    def _legacy_sources(self) -> dict[str, QualityDataSource]:
-        found: dict[str, dict[str, Path]] = {}
-        if not self.workdir.exists():
-            return {}
-
-        for path in self.workdir.glob("03_*_merged*.csv"):
-            if not path.is_file():
-                continue
-            project_name = _legacy_project_name(path.name)
-            if not project_name:
-                continue
-            item = found.setdefault(project_name, {})
-            if path.name.endswith("_merged_classified.csv"):
-                item["classified"] = path
-            elif path.name.endswith("_merged.csv"):
-                item["merged"] = path
-
-        out: dict[str, QualityDataSource] = {}
-        for project_name, paths in found.items():
-            if "classified" in paths:
-                out[project_name] = QualityDataSource(
-                    project_name=project_name,
-                    source_kind="classified",
-                    source_scope="legacy",
-                    paths=(paths["classified"],),
-                )
-            elif "merged" in paths:
-                out[project_name] = QualityDataSource(
-                    project_name=project_name,
-                    source_kind="merged",
-                    source_scope="legacy",
-                    paths=(paths["merged"],),
-                    fallback_used=True,
-                )
-        return out
 
     def _iter_project_dirs(self) -> list[Path]:
         if not self.projects_root.exists():
@@ -155,16 +114,6 @@ class DataQualityRepository:
             "fallback_used": source.fallback_used,
             "updated_at": datetime.fromtimestamp(updated_at).isoformat(timespec="seconds") if updated_at else None,
         }
-
-
-def _legacy_project_name(filename: str) -> str | None:
-    if not filename.startswith("03_"):
-        return None
-    if filename.endswith("_merged_classified.csv"):
-        return filename.removeprefix("03_").removesuffix("_merged_classified.csv")
-    if filename.endswith("_merged.csv"):
-        return filename.removeprefix("03_").removesuffix("_merged.csv")
-    return None
 
 
 def _safe_segment(value: str) -> str:

@@ -1,2 +1,2 @@
-"""Utility modules for MPStats notebook pipeline."""
+"""Shared pipeline services used by the MPStats web app."""
 

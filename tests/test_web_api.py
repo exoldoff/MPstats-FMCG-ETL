@@ -1445,6 +1445,10 @@ class WebApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             seed_project(root)
+            unit_processed = root / "data" / "projects" / "unit" / "processed"
+            merged_only_dir = root / "data" / "projects" / "merged_only" / "merged"
+            unit_processed.mkdir(parents=True, exist_ok=True)
+            merged_only_dir.mkdir(parents=True, exist_ok=True)
             write_semicolon_csv(
                 pd.DataFrame(
                     [
@@ -1452,7 +1456,7 @@ class WebApiTest(unittest.TestCase):
                         {"Название": "Лимон 2 кг", "Маркетплейс": "WB", "Категория": "Кислота", "SKU": "sku-2", "Вес, кг": 2.0, "Подкатегория": "Лимонная"},
                     ]
                 ),
-                root / "pipeline" / "03_unit_merged_classified.csv",
+                unit_processed / "unit_classified.csv",
             )
             write_semicolon_csv(
                 pd.DataFrame(
@@ -1460,7 +1464,7 @@ class WebApiTest(unittest.TestCase):
                         {"Название": "Мыло 1 кг", "Маркетплейс": "Ozon", "Категория": "Мыло", "SKU": "soap-1", "Вес, кг": 1.0},
                     ]
                 ),
-                root / "pipeline" / "03_merged_only_merged.csv",
+                merged_only_dir / "merged_only.csv",
             )
             settings = make_settings(root)
             app = create_app(settings, start_workers=False)
