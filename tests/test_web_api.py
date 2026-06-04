@@ -118,7 +118,7 @@ class WebApiTest(unittest.TestCase):
                 table_name=settings.products_table,
                 project_name="unit",
                 year=2025,
-                month=1,
+                month=2,
                 marketplace_code="oz",
                 category_key="sugar",
             )
@@ -170,6 +170,8 @@ class WebApiTest(unittest.TestCase):
                         {"SKU": "valid", "Продажи, шт": "5", "Объем, т": "0,25"},
                         {"SKU": "zero-sales", "Продажи, шт": "0", "Объем, т": "0,25"},
                         {"SKU": "zero-volume", "Продажи, шт": "5", "Объем, т": "0"},
+                        {"SKU": "bad-sales", "Продажи, шт": "мусор", "Объем, т": "0,25"},
+                        {"SKU": "bad-volume", "Продажи, шт": "5", "Объем, т": "мусор"},
                     ]
                 ),
                 source_file,
@@ -189,7 +191,20 @@ class WebApiTest(unittest.TestCase):
             self.assertEqual(inserted, 1)
             with connect(settings.db_path) as con:
                 rows = con.execute(f"SELECT SKU FROM {settings.products_table}").fetchall()
+                null_metadata = con.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {settings.products_table}
+                    WHERE {quote_duckdb_name('__project_name')} IS NULL
+                       OR {quote_duckdb_name('__year')} IS NULL
+                       OR {quote_duckdb_name('__month')} IS NULL
+                       OR {quote_duckdb_name('__marketplace_code')} IS NULL
+                       OR {quote_duckdb_name('__category_key')} IS NULL
+                       OR {quote_duckdb_name('__row_hash')} IS NULL
+                    """
+                ).fetchone()[0]
             self.assertEqual(rows, [("valid",)])
+            self.assertEqual(null_metadata, 0)
 
     def test_db_import_idempotent_rerun_does_not_duplicate_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -231,7 +246,7 @@ class WebApiTest(unittest.TestCase):
             )
 
             self.assertEqual(first_inserted, 2)
-            self.assertEqual(second_inserted, 0)
+            self.assertEqual(second_inserted, 2)
             with connect(settings.db_path) as con:
                 total = con.execute(f"SELECT COUNT(*) FROM {settings.products_table}").fetchone()[0]
                 duplicate_hashes = con.execute(
@@ -247,6 +262,57 @@ class WebApiTest(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(total, 2)
             self.assertEqual(duplicate_hashes, 0)
+
+    def test_db_import_rolls_back_slice_replace_on_insert_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            source_file = root / "products.csv"
+            write_semicolon_csv(
+                pd.DataFrame([{"SKU": "sku-1", "Продажи, шт": "5", "Объем, кг": "1.5"}]),
+                source_file,
+            )
+            inserted = repository.import_products_file_idempotent(
+                run_id="run-1",
+                csv_path=source_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+            self.assertEqual(inserted, 1)
+
+            replacement_file = root / "replacement.csv"
+            write_semicolon_csv(
+                pd.DataFrame([{"SKU": "sku-2", "Продажи, шт": "9", "Объем, кг": "3.5"}]),
+                replacement_file,
+            )
+            with patch(
+                "mpstats_app.repositories.duckdb_repository._insert_stage_sql",
+                return_value="INSERT INTO missing_table SELECT 1",
+            ):
+                with self.assertRaises(Exception):
+                    repository.import_products_file_idempotent(
+                        run_id="run-2",
+                        csv_path=replacement_file,
+                        table_name=settings.products_table,
+                        project_name="unit",
+                        year=2025,
+                        month=1,
+                        marketplace_code="oz",
+                        category_key="sugar",
+                    )
+
+            with connect(settings.db_path) as con:
+                rows = con.execute(f"SELECT SKU FROM {settings.products_table}").fetchall()
+                loads = con.execute("SELECT COUNT(*) FROM pipeline_loads").fetchone()[0]
+            self.assertEqual(rows, [("sku-1",)])
+            self.assertEqual(loads, 1)
 
     def test_health_settings_schedules_and_run_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

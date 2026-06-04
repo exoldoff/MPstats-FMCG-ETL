@@ -1555,38 +1555,25 @@ class DuckDbAppRepository:
                         stage_table=stage_table,
                         stage_columns=stage_columns,
                     )
-                    if overwrite:
-                        con.execute(
-                            f"""
-                            DELETE FROM {quoted_table}
-                            WHERE {quote_duckdb_name('__project_name')} = ?
-                              AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
-                              AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
-                              AND {quote_duckdb_name('__marketplace_code')} = ?
-                              AND {quote_duckdb_name('__category_key')} = ?
-                            """,
-                            [project_name, int(year), int(month), marketplace_code, category_key],
-                        )
-                    inserted = int(
-                        con.execute(
-                            f"""
-                            SELECT COUNT(*)
-                            FROM {quote_identifier(stage_table)} d
-                            WHERE NOT EXISTS (
-                                SELECT 1
-                                FROM {quoted_table} t
-                                WHERE t.{quote_duckdb_name('__row_hash')} = d.{quote_duckdb_name('__row_hash')}
-                            )
-                            """
-                        ).fetchone()[0]
+                    con.execute(
+                        f"""
+                        DELETE FROM {quoted_table}
+                        WHERE {quote_duckdb_name('__project_name')} = ?
+                          AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
+                          AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
+                          AND {quote_duckdb_name('__marketplace_code')} = ?
+                          AND {quote_duckdb_name('__category_key')} = ?
+                        """,
+                        [project_name, int(year), int(month), marketplace_code, category_key],
                     )
+                    inserted = _stage_count(con, stage_table)
                     con.execute(
                         _insert_stage_sql(
                             quoted_table=quoted_table,
                             stage_table=stage_table,
                             columns=stage_columns,
                             target_types=target_types,
-                            deduplicate=True,
+                            deduplicate=False,
                         )
                     )
 
@@ -1602,7 +1589,7 @@ class DuckDbAppRepository:
                         str(csv_path),
                         load_name or f"smart_pipeline:{run_id}",
                         project_name,
-                        "replace" if overwrite else "append_dedup",
+                        "replace" if overwrite else "replace_slice",
                         inserted,
                     ],
                 )
