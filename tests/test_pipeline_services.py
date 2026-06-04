@@ -325,6 +325,59 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(int(report.iloc[0]["applied_rows"]), 1)
             self.assertEqual(result["Подкатегория"].fillna("").tolist(), ["Literal", ""])
 
+    def test_numeric_classifier_rules_compare_weight_kg(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Вес lt;Вес, кг;lt;10 кг;yes;fill_empty;;",
+                        "1;2;*;Вес lte;Вес, кг;lte;10;yes;fill_empty;;",
+                        "1;3;*;Вес gt;Вес, кг;gt;10,0;yes;fill_empty;;",
+                        "1;4;*;Вес gte;Вес, кг;gte;10.0;yes;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame(
+                [
+                    {"Категория": "Тест", "Название": "малый", "Вес, кг": 9.5},
+                    {"Категория": "Тест", "Название": "ровно", "Вес, кг": "10,0"},
+                    {"Категория": "Тест", "Название": "большой", "Вес, кг": 12},
+                    {"Категория": "Тест", "Название": "без веса", "Вес, кг": ""},
+                ]
+            )
+
+            result, report = apply_classifiers(frame, rules_file)
+
+            self.assertEqual(result["Вес lt"].fillna("").tolist(), ["yes", "", "", ""])
+            self.assertEqual(result["Вес lte"].fillna("").tolist(), ["yes", "yes", "", ""])
+            self.assertEqual(result["Вес gt"].fillna("").tolist(), ["", "", "yes", ""])
+            self.assertEqual(result["Вес gte"].fillna("").tolist(), ["", "yes", "yes", ""])
+            self.assertEqual(report["candidate_rows"].tolist(), [1, 2, 1, 2])
+
+    def test_numeric_classifier_rule_rejects_non_numeric_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Группа веса;Вес, кг;lt;десять;До 10 кг;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame([{"Категория": "Тест", "Название": "малый", "Вес, кг": 9.5}])
+
+            with self.assertRaisesRegex(ValueError, "requires a numeric pattern"):
+                apply_classifiers(frame, rules_file)
+
     def test_category_prefilter_uses_category_changed_by_previous_rule(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

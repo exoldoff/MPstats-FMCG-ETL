@@ -103,6 +103,10 @@ const matchTypes = [
   ["regex", "regex"],
   ["equals", "равно"],
   ["startswith", "начинается с"],
+  ["gt", ">"],
+  ["gte", ">="],
+  ["lt", "<"],
+  ["lte", "<="],
   ["otherwise", "если пусто"]
 ];
 
@@ -147,7 +151,7 @@ type PipelineOperation = {
   finishedAt: number | null;
 };
 
-const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Подкатегория", "Тип", "Вид мяса"];
+const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Подкатегория", "Тип", "Вид мяса"];
 
 const statusLabels: Record<string, string> = {
   raw: "raw",
@@ -2250,6 +2254,10 @@ function matchTypeLabel(type: string) {
   return matchTypes.find(([value]) => value === type)?.[1] ?? type;
 }
 
+function isNumericMatchType(type: string) {
+  return ["gt", "gte", "lt", "lte"].includes(type);
+}
+
 function ruleModeLabel(mode: string) {
   return ruleModes.find(([value]) => value === mode)?.[1] ?? mode;
 }
@@ -3669,7 +3677,7 @@ function ClassifierRulesEditor(props: {
       <div className="editor-layout">
         {rule ? (
           <div className="editor-form">
-            <SectionTitle icon={<Settings />} title="Правило" hint="Обычное правило ищет текст в выбранной колонке. Правило «если пусто» заполняет целевую колонку только там, где после правил выше ещё пусто." />
+            <SectionTitle icon={<Settings />} title="Правило" hint="Обычное правило проверяет выбранную колонку. Правило «если пусто» заполняет целевую колонку только там, где после правил выше ещё пусто." />
             <Toggle label="Правило активно" checked={rule.active} onChange={(value) => props.onChange(rule.id, { active: value })} />
             <datalist id="classifier-columns">
               {commonClassifierColumns.map((column) => <option key={column} value={column} />)}
@@ -3704,12 +3712,12 @@ function ClassifierRulesEditor(props: {
 	                      ) : (
 	                        <label>Связка<select value={condition.join_with_prev} onChange={(event) => props.onConditionChange(rule.id, index, { join_with_prev: event.target.value })}><option value="and">И</option><option value="or">ИЛИ</option></select></label>
 	                      )}
-	                      <label>Где искать<input list="classifier-columns" value={condition.match_field} onChange={(event) => props.onConditionChange(rule.id, index, { match_field: event.target.value })} placeholder="Название, SKU, Бренд..." /></label>
+	                      <label>Где искать<input list="classifier-columns" value={condition.match_field} onChange={(event) => props.onConditionChange(rule.id, index, { match_field: event.target.value })} placeholder="Название, SKU, Вес, кг..." /></label>
 	                      <label>Как искать<select value={condition.match_type} onChange={(event) => {
 	                        const matchType = event.target.value;
 	                        props.onConditionChange(rule.id, index, matchType === "otherwise" ? { match_type: matchType, match_field: "", pattern: "" } : { match_type: matchType });
 	                      }}>{matchTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-	                      <label>Что искать<input value={condition.pattern} onChange={(event) => props.onConditionChange(rule.id, index, { pattern: event.target.value })} placeholder="Например: лимон" /></label>
+	                      <label>Что искать<input value={condition.pattern} onChange={(event) => props.onConditionChange(rule.id, index, { pattern: event.target.value })} placeholder={isNumericMatchType(condition.match_type) ? "Например: 10 или 10 кг" : "Например: лимон"} /></label>
 	                      <button className="tiny-button danger-inline" title="Удалить условие." disabled={rule.conditions.length <= 1} onClick={() => props.onDeleteCondition(rule.id, index)}><Trash2 size={14} /></button>
 	                    </div>
 	                  )

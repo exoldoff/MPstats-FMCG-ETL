@@ -29,7 +29,7 @@ export type CategorySourceRow = {
 export type ClassifierCondition = {
   join_with_prev: "and" | "or" | string;
   match_field: string;
-  match_type: "contains" | "not_contains" | "regex" | "equals" | "startswith" | string;
+  match_type: "contains" | "not_contains" | "regex" | "equals" | "startswith" | "gt" | "gte" | "lt" | "lte" | string;
   pattern: string;
 };
 

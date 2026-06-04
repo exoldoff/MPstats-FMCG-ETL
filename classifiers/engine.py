@@ -19,10 +19,20 @@ REQUIRED_RULE_COLUMNS: Tuple[str, ...] = (
     "mode",
 )
 
-ALLOWED_MATCH_TYPES = {"contains", "not_contains", "regex", "equals", "startswith", "otherwise"}
+NUMERIC_MATCH_TYPES = {"gt", "gte", "lt", "lte"}
+ALLOWED_MATCH_TYPES = {
+    "contains",
+    "not_contains",
+    "regex",
+    "equals",
+    "startswith",
+    "otherwise",
+    *NUMERIC_MATCH_TYPES,
+}
 ALLOWED_MODES = {"fill_empty", "overwrite"}
 ALLOWED_LOGIC_OPERATORS = {"and", "or"}
 CONDITIONS_COLUMN = "conditions_json"
+NUMBER_PATTERN = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
 
 def default_rules_path(base_dir: str | Path | None = None) -> Path:
@@ -229,7 +239,42 @@ def _normalize_fill_unclassified(
     return normalized
 
 
+def _numeric_series(series: pd.Series) -> pd.Series:
+    text = series.astype("string")
+    text = text.str.replace("\u00a0", "", regex=False)
+    text = text.str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
+    extracted = text.str.extract(r"([-+]?\d+(?:\.\d+)?)", expand=False)
+    return pd.to_numeric(extracted, errors="coerce")
+
+
+def _numeric_pattern(pattern: str, match_type: str) -> float:
+    text = str(pattern).strip().replace("\u00a0", "").replace(" ", "")
+    match = NUMBER_PATTERN.search(text)
+    if match is None:
+        raise ValueError(
+            f"Numeric match_type '{match_type}' requires a numeric pattern, got '{pattern}'."
+        )
+    return float(match.group(0).replace(",", "."))
+
+
+def _build_numeric_match_mask(series: pd.Series, match_type: str, pattern: str) -> pd.Series:
+    values = _numeric_series(series)
+    threshold = _numeric_pattern(pattern, match_type)
+    if match_type == "gt":
+        return values.gt(threshold).fillna(False)
+    if match_type == "gte":
+        return values.ge(threshold).fillna(False)
+    if match_type == "lt":
+        return values.lt(threshold).fillna(False)
+    if match_type == "lte":
+        return values.le(threshold).fillna(False)
+    raise ValueError(f"Unsupported numeric match_type: {match_type}")
+
+
 def _build_match_mask(series: pd.Series, match_type: str, pattern: str) -> pd.Series:
+    if match_type in NUMERIC_MATCH_TYPES:
+        return _build_numeric_match_mask(series, match_type, pattern)
+
     text = series.fillna("").astype(str)
     if match_type == "contains":
         return text.str.contains(pattern, case=False, regex=False, na=False)
