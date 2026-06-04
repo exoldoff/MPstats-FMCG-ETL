@@ -49,5 +49,9 @@ pipeline/*.xlsx
 03_step3_standardized/
 04_step4_parsed/
 
+# Локальные CSV-справочники web-app
+classifiers/rules.csv
+Справочник категори*MP STATS.csv
+
 # Excel-дубликаты справочников не являются источником правды
 *.xlsx
