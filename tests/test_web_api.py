@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import csv
 from datetime import date
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -944,6 +945,162 @@ class WebApiTest(unittest.TestCase):
                 self.assertTrue(cube_item["is_heavy"])
                 self.assertEqual(cube_item["data_mode"], "heavy")
                 self.assertIsNotNone(cube_item["reports_built_at"])
+
+    def test_report_csv_build_uses_duckdb_copy_and_preserves_csv_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            lemon_file = root / "lemon.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Лимонная кислота",
+                            "SKU": "sku-1",
+                            "Название": "лимон 1 кг",
+                            "Бренд": "Brand A",
+                            "Продажи, шт": 3,
+                            "Выручка, руб": 30,
+                            "Объем, кг": 1.5,
+                        },
+                        {
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Лимонная кислота",
+                            "SKU": "sku-2",
+                            "Название": "лимон 2 кг",
+                            "Бренд": "Brand A",
+                            "Продажи, шт": 5,
+                            "Выручка, руб": 50,
+                            "Объем, кг": 2.5,
+                        },
+                    ]
+                ),
+                lemon_file,
+            )
+            repository.import_products_file_idempotent(
+                run_id="run-report-csv-1",
+                csv_path=lemon_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="lemon-oz",
+            )
+            soap_file = root / "soap.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Маркетплейс": "Wildberries",
+                            "Категория": "Мыло",
+                            "SKU": "soap-1",
+                            "Название": "мыло",
+                            "Бренд": "Brand B",
+                            "Продажи, шт": 9,
+                            "Выручка, руб": 90,
+                            "Объем, кг": 3,
+                        }
+                    ]
+                ),
+                soap_file,
+            )
+            repository.import_products_file_idempotent(
+                run_id="run-report-csv-2",
+                csv_path=soap_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=2,
+                marketplace_code="wb",
+                category_key="soap-wb",
+            )
+
+            app = create_app(settings, start_workers=False)
+            with TestClient(app) as client, patch.object(
+                app.state.repository,
+                "fetch_report_dataframe",
+                side_effect=AssertionError("Report CSV export should use DuckDB COPY, not pandas."),
+            ):
+                built = client.post(
+                    "/api/reports/build",
+                    json={
+                        "project_name": "unit",
+                        "report_type": "brand_month",
+                        "category_keys": ["lemon-oz"],
+                        "period_from": "2025-01",
+                        "period_to": "2025-01",
+                        "export_format": "csv",
+                        "output_dir": str(root / "reports"),
+                        "max_rows": 5000,
+                    },
+                )
+                self.assertEqual(built.status_code, 200)
+
+            payload = built.json()
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["source_total"], 1)
+            artifact = payload["artifacts"][0]
+            csv_path = Path(artifact["path"])
+            self.assertTrue(csv_path.exists())
+            self.assertGreater(csv_path.stat().st_size, 0)
+            self.assertEqual(csv_path.parent, (root / "reports" / "unit").resolve())
+            self.assertTrue(csv_path.read_bytes().startswith(b"\xef\xbb\xbf"))
+            csv_text = csv_path.read_text(encoding="utf-8-sig")
+            self.assertIn("Период;Год;Месяц;Маркетплейс;Категория;Бренд", csv_text.splitlines()[0])
+            rows = list(csv.DictReader(StringIO(csv_text), delimiter=";"))
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["Период"], "2025-01")
+            self.assertEqual(row["Маркетплейс"], "Ozon")
+            self.assertEqual(row["Категория"], "Лимонная кислота")
+            self.assertEqual(row["Бренд"], "Brand A")
+            self.assertEqual(float(row["Продажи, шт"]), 8.0)
+            self.assertEqual(float(row["Выручка, руб"]), 80.0)
+            self.assertNotIn("Мыло", csv_text)
+            self.assertNotIn("2025-02", csv_text)
+
+    def test_duckdb_csv_helper_writes_zero_rows_with_header_and_logs_sql_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            target = root / "nested" / "zero.csv"
+            result = repository.export_query_to_csv(
+                "SELECT 1 AS id, 'лимон' AS name WHERE false",
+                target,
+                delimiter=";",
+                header=True,
+            )
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.row_count, 0)
+            self.assertEqual(result.output_path, target)
+            self.assertTrue(target.exists())
+            self.assertTrue(target.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertEqual(target.read_text(encoding="utf-8-sig").splitlines()[0], "id;name")
+
+            named_target = root / "nested" / "named.csv"
+            named_result = repository.export_query_to_csv(
+                "SELECT $value AS id, $label AS name",
+                named_target,
+                params={"value": 7, "label": "семь"},
+            )
+            self.assertEqual(named_result.row_count, 1)
+            named_rows = list(csv.DictReader(StringIO(named_target.read_text(encoding="utf-8-sig")), delimiter=";"))
+            self.assertEqual(named_rows, [{"id": "7", "name": "семь"}])
+
+            with self.assertLogs("mpstats_app.repositories.duckdb_repository", level="ERROR") as logs:
+                with self.assertRaises(Exception):
+                    repository.export_query_to_csv("SELECT missing_column FROM missing_table", root / "broken.csv")
+            self.assertTrue(any("DuckDB COPY CSV export failed" in message for message in logs.output))
 
     def test_workflow_categories_classify_preview_and_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

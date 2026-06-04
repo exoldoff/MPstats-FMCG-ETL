@@ -12,7 +12,7 @@ DuckDB remains the main local analytical engine. The current production workflow
 | Web DB import | `DuckDbAppRepository.import_products_file_idempotent` previously read classified CSV into pandas and calculated row hashes in Python. | High memory use and slow CPU path on 1M+ rows. | Done: replaced with DuckDB staging SQL. |
 | Idempotency | Smart pipeline has `cube_registry` skip. The old Python `__row_hash` and the new DuckDB SQL hash do not match byte-for-byte. | Anti-join by new hash is not safe for deduping already existing legacy rows. | Decision B adopted: smart import replaces the whole slice by project/period/marketplace/category inside one transaction. |
 | Transactions | Import table changes and load history insert were not consistently grouped. | Partial updates were possible if a save failed mid-flow. | Done for products import; cube registry updates remain a separate service operation. |
-| CSV export | Raw export already uses DuckDB `COPY`. Report CSV still fetches aggregate to pandas before writing. | Unneeded pandas materialization for report CSV. | Later step: add direct report `COPY`. |
+| CSV export | Raw export already uses DuckDB `COPY`. Report CSV now uses direct DuckDB `COPY` for plain SQL reports. | Avoids pandas materialization for aggregated CSV files. | Done for report CSV; XLSX remains unchanged. |
 | XLSX export | openpyxl write-only mode is safe for formatted/sheet-controlled output. DuckDB Excel extension can write simple XLSX. | pandas/openpyxl should stay only on final aggregates or controlled batches. | Benchmark includes both simple DuckDB XLSX and pandas/openpyxl baseline. |
 | DB settings | Connections use default `duckdb.connect(path)`. | Fine by default, but no central place for `threads`, `memory_limit`, `temp_directory`. | Later step: managed connection helper with optional settings. |
 
@@ -52,6 +52,30 @@ Quality checks added:
 - Regression test: duplicate `__row_hash` count remains `0`.
 - Existing tests still cover positive sales/volume filtering, garbage sales/volume filtering, required metadata and text widening.
 
+### Step 3: report CSV via DuckDB COPY
+
+- Added repository helper `export_query_to_csv(query, output_path, params=None, delimiter=';', header=True)`.
+- The helper creates the parent directory, writes through DuckDB `COPY (SELECT ...) TO CSV`, returns `ExportResult` with path, file size, duration, status and `row_count` when DuckDB returns it.
+- Report CSV build now calls `DuckDbAppRepository.export_report_to_csv` instead of `fetch_report_dataframe(...).to_csv(...)`.
+- Report preview and report XLSX still use pandas/openpyxl paths:
+  - preview needs a small DataFrame to serialize JSON rows;
+  - XLSX uses openpyxl workbook writing, freeze panes and filters;
+  - raw XLSX batching is outside this step and was not changed.
+- CSV output keeps the current user-facing contract: delimiter `;`, header row and `utf-8-sig` BOM for Excel-friendly opening.
+
+Row count policy:
+
+- CSV build does not run `SELECT COUNT(*) FROM (<aggregate query>)` before `COPY`, because that doubles the heavy aggregate work.
+- `row_count` is read from DuckDB `COPY` result when available. On local DuckDB 1.5.2 this returns the exported row count.
+- `source_total` for CSV build is therefore the number of exported rows. Preview still returns the full counted total for pagination.
+- If CSV `COPY` exports 0 rows, the service removes the created file and returns the existing "Нет строк для отчёта" error. The lower-level helper itself can still create a header-only CSV for direct repository use.
+
+DB impact:
+
+- No tables, columns or migrations were added.
+- No import/smart pipeline SQL was changed.
+- No XLSX export path was changed.
+
 ## Benchmark stand
 
 Artifacts:
@@ -84,6 +108,7 @@ Run examples:
 python3 scripts/duckdb_benchmark.py --size small
 python3 scripts/duckdb_benchmark.py --size medium --threads 4 --memory-limit 4GB
 python3 scripts/duckdb_benchmark.py --size large --threads 4 --memory-limit 6GB --skip-excel
+python3 scripts/duckdb_benchmark.py --all-sizes --skip-excel
 ```
 
 Outputs are written to `data/duckdb_benchmark/`:
@@ -96,7 +121,47 @@ Outputs are written to `data/duckdb_benchmark/`:
 
 ## Benchmark results
 
-Local runs:
+Step 3 local run:
+
+- `python3 scripts/duckdb_benchmark.py --all-sizes --workdir data/duckdb_benchmark_step3 --skip-excel`
+
+Memory:
+
+- Per-operation memory was not measured. The project has no existing simple RSS/heap benchmark helper, and this step avoids adding a separate profiler.
+
+### Step 3 report CSV results
+
+The report CSV benchmark uses a top-SKU-like aggregate query grouped by period/category/network/brand/SKU. It compares:
+
+- old path: DuckDB aggregate query -> `fetchdf()` -> `df.to_csv(..., sep=';', encoding='utf-8-sig')`;
+- new path: `COPY (aggregate query) TO CSV`.
+
+| size | input rows | exported report rows | old duration, s | new duration, s | speedup | old file bytes | new file bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| small | 10,000 | 9,989 | 0.0344 | 0.0100 | 3.44x | 799,834 | 799,831 |
+| medium | 500,000 | 499,496 | 1.4445 | 0.1374 | 10.52x | 39,974,646 | 39,974,643 |
+| large | 2,000,000 | 750,000 | 2.5734 | 0.2568 | 10.02x | 68,347,072 | 68,349,535 |
+
+Notes:
+
+- Row counts match old/new in all three runs.
+- File sizes are close but not byte-identical because pandas and DuckDB serialize floating-point values slightly differently.
+- Excel benchmarks were skipped for Step 3 by design.
+
+### COPY CSV limitations
+
+DuckDB `COPY` is used only for simple report CSV exports where the result is a normal SQL result set.
+
+Pandas/openpyxl should remain for cases that need:
+
+- XLSX workbook structure, freeze panes, filters, styles or formulas;
+- several logical tables in one artifact;
+- Python post-processing before writing;
+- small preview data that must be converted to JSON rows.
+
+Current report CSV does not need these features, so it is a type A export and now goes through direct `COPY`.
+
+Earlier Step 1/2 local runs:
 
 - `python3 scripts/duckdb_benchmark.py --size small --workdir data/duckdb_benchmark --skip-excel`
 - `python3 scripts/duckdb_benchmark.py --size medium --workdir data/duckdb_benchmark --skip-excel`
@@ -161,7 +226,9 @@ Current verification focus:
 
 1. Keep web import on DuckDB SQL staging.
 2. Keep idempotency as slice replacement for smart pipeline imports.
-3. Do not change Excel export, report CSV export or DB schema in this verification pass.
+3. Keep raw CSV export on DuckDB `COPY`.
+4. Keep Excel export and import/smart pipeline unchanged in Step 3.
+5. Use direct DuckDB `COPY` for plain report CSV exports.
 
 Verification smoke:
 
@@ -171,3 +238,4 @@ Verification smoke:
 - Products API returns `2` rows.
 - Raw CSV export job succeeds and creates a file.
 - Raw XLSX export succeeds and creates a file.
+- Report CSV export succeeds and does not call pandas `fetchdf()` for the final file.

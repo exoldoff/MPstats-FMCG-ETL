@@ -140,44 +140,72 @@ class ReportService:
             export_format=export_format,
             max_rows=max_rows,
         )
-        total = self.repository.count_report_rows(
-            table_name=self.settings.products_table,
-            project_name=spec.project_name,
-            report_type=spec.report_type,
-            category_keys=spec.category_keys,
-            period_from_index=spec.period_from_index,
-            period_to_index=spec.period_to_index,
-        )
-        if total <= 0:
-            raise ValueError("Нет строк для отчёта. Проверь проект, период и категории.")
-        if spec.export_format == "xlsx" and total > EXCEL_MAX_DATA_ROWS:
-            raise ValueError("Агрегированный отчёт всё ещё больше лимита Excel. Выбери CSV или сузь период/категории.")
-
-        limit = spec.max_rows if spec.report_type == "top_sku" else None
-        df = self.repository.fetch_report_dataframe(
-            table_name=self.settings.products_table,
-            project_name=spec.project_name,
-            report_type=spec.report_type,
-            category_keys=spec.category_keys,
-            period_from_index=spec.period_from_index,
-            period_to_index=spec.period_to_index,
-            limit=limit,
-            offset=0,
-        )
         target_dir = self.resolve_output_dir(output_dir, spec.project_name)
         target_dir.mkdir(parents=True, exist_ok=True)
         self.repository.set_setting("report_output_dir", str(target_dir))
-        target = _unique_path(target_dir / self._filename(spec, rows=len(df)))
+
+        source_total: int
+        warnings: list[str]
         if spec.export_format == "csv":
-            df.to_csv(target, sep=";", index=False, encoding="utf-8-sig")
+            limit = spec.max_rows if spec.report_type == "top_sku" else None
+            target = _unique_path(target_dir / self._filename(spec, rows=0))
+            export_result = self.repository.export_report_to_csv(
+                table_name=self.settings.products_table,
+                target=target,
+                project_name=spec.project_name,
+                report_type=spec.report_type,
+                category_keys=spec.category_keys,
+                period_from_index=spec.period_from_index,
+                period_to_index=spec.period_to_index,
+                limit=limit,
+            )
+            written_rows = int(export_result.row_count or 0)
+            if written_rows <= 0:
+                target.unlink(missing_ok=True)
+                raise ValueError("Нет строк для отчёта. Проверь проект, период и категории.")
+            final_target = _unique_path(target_dir / self._filename(spec, rows=written_rows))
+            if final_target != target:
+                target.replace(final_target)
+                target = final_target
+            source_total = written_rows
+            warnings = self._csv_warnings(spec=spec, rows=written_rows)
         else:
+            total = self.repository.count_report_rows(
+                table_name=self.settings.products_table,
+                project_name=spec.project_name,
+                report_type=spec.report_type,
+                category_keys=spec.category_keys,
+                period_from_index=spec.period_from_index,
+                period_to_index=spec.period_to_index,
+            )
+            if total <= 0:
+                raise ValueError("Нет строк для отчёта. Проверь проект, период и категории.")
+            if total > EXCEL_MAX_DATA_ROWS:
+                raise ValueError("Агрегированный отчёт всё ещё больше лимита Excel. Выбери CSV или сузь период/категории.")
+
+            limit = spec.max_rows if spec.report_type == "top_sku" else None
+            df = self.repository.fetch_report_dataframe(
+                table_name=self.settings.products_table,
+                project_name=spec.project_name,
+                report_type=spec.report_type,
+                category_keys=spec.category_keys,
+                period_from_index=spec.period_from_index,
+                period_to_index=spec.period_to_index,
+                limit=limit,
+                offset=0,
+            )
+            target = _unique_path(target_dir / self._filename(spec, rows=len(df)))
             self._write_xlsx(target, df)
+            written_rows = len(df)
+            source_total = total
+            warnings = self._warnings(spec=spec, total=total)
+
         self.repository.mark_reports_built(project_name=spec.project_name, category_keys=spec.category_keys)
         artifact = {
             "path": str(target),
             "filename": target.name,
             "format": spec.export_format,
-            "rows": len(df),
+            "rows": written_rows,
             "report_type": spec.report_type,
             "report_label": REPORT_TYPES[spec.report_type]["label"],
         }
@@ -186,10 +214,10 @@ class ReportService:
             "report_type": spec.report_type,
             "report_label": REPORT_TYPES[spec.report_type]["label"],
             "artifacts": [artifact],
-            "total": len(df),
-            "source_total": total,
+            "total": written_rows,
+            "source_total": source_total,
             "output_dir": str(target_dir),
-            "warnings": self._warnings(spec=spec, total=total),
+            "warnings": warnings,
         }
 
     def resolve_output_dir(self, output_dir: str | None, project_name: str) -> Path:
@@ -281,6 +309,12 @@ class ReportService:
         if spec.report_type == "top_sku" and total > spec.max_rows:
             warnings.append(f"Топ SKU ограничен первыми {spec.max_rows} агрегированными строками из {total}.")
         return warnings
+
+    @staticmethod
+    def _csv_warnings(*, spec: ReportSpec, rows: int) -> list[str]:
+        if spec.report_type == "top_sku" and rows >= spec.max_rows:
+            return [f"Топ SKU CSV ограничен первыми {spec.max_rows} агрегированными строками."]
+        return []
 
 
 def _period_label_to_index(value: str | None) -> int | None:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import io
 import json
+import logging
 from pathlib import Path
 from threading import RLock
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -39,6 +42,16 @@ REPORT_REVENUE_COLUMNS = ("Выручка, руб", "Выручка", "revenue")
 REPORT_VOLUME_KG_COLUMNS = ("Объем, кг", "Объём, кг", "volume_kg")
 REPORT_VOLUME_T_COLUMNS = ("Объем, т", "Объём, т", "volume_t")
 REPORT_CLASSIFICATION_COLUMNS = ("Тип", "Подкатегория", "Вид", "Вид мяса", "Сегмент")
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExportResult:
+    output_path: Path
+    file_size_bytes: int
+    duration_seconds: float
+    row_count: int | None
+    status: str
 
 
 def _table_column_types(con: Any, table_name: str) -> dict[str, str]:
@@ -253,10 +266,46 @@ def _stage_count(con: Any, stage_table: str) -> int:
     return int(row[0]) if row else 0
 
 
-def _csv_header_prefix(columns: list[str]) -> str:
+def _csv_header_prefix(columns: list[str], *, delimiter: str = ";") -> str:
     buffer = io.StringIO()
-    csv.writer(buffer, delimiter=";", lineterminator="\n").writerow(columns)
+    csv.writer(buffer, delimiter=delimiter, lineterminator="\n").writerow(columns)
     return "\ufeff" + buffer.getvalue()
+
+
+def _clean_copy_query(query: str) -> str:
+    cleaned = query.strip()
+    if cleaned.endswith(";"):
+        cleaned = cleaned[:-1].rstrip()
+    if not cleaned:
+        raise ValueError("SQL-запрос для CSV-экспорта пуст.")
+    return cleaned
+
+
+def _copy_row_count(rows: list[Any]) -> int | None:
+    if len(rows) != 1:
+        return None
+    row = rows[0]
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_query_params(params: dict[str, Any] | list[Any] | tuple[Any, ...] | None) -> dict[str, Any] | list[Any]:
+    if params is None:
+        return []
+    if isinstance(params, dict):
+        return dict(params)
+    return list(params)
+
+
+def _validate_csv_delimiter(delimiter: str) -> str:
+    clean = str(delimiter or ";")
+    if len(clean) != 1 or clean in {"\n", "\r"}:
+        raise ValueError("CSV-разделитель должен быть одним символом без перевода строки.")
+    return clean
 
 
 def _period_index_to_label(index: int) -> str:
@@ -1829,6 +1878,74 @@ class DuckDbAppRepository:
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
             return con.execute(query, params).fetchdf()
+
+    def export_query_to_csv(
+        self,
+        query: str,
+        output_path: Path,
+        params: dict[str, Any] | list[Any] | None = None,
+        delimiter: str = ";",
+        header: bool = True,
+    ) -> ExportResult:
+        target = Path(output_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        clean_query = _clean_copy_query(query)
+        clean_delimiter = _validate_csv_delimiter(delimiter)
+        execute_params = _normalize_query_params(params)
+        started = time.perf_counter()
+        try:
+            with self._lock, connect(self.settings.db_path) as con:
+                apply_migrations(con)
+                if header:
+                    metadata = con.execute(f"SELECT * FROM ({clean_query}) AS export_source LIMIT 0", execute_params)
+                    columns = [str(item[0]) for item in (metadata.description or [])]
+                    header_prefix = _csv_header_prefix(columns, delimiter=clean_delimiter)
+                    options = (
+                        f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, "
+                        f"PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')"
+                    )
+                else:
+                    options = f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false)"
+                rows = con.execute(
+                    f"COPY ({clean_query}) TO {sql_literal(str(target))} {options}",
+                    execute_params,
+                ).fetchall()
+        except Exception:
+            LOGGER.exception("DuckDB COPY CSV export failed: %s", target)
+            raise
+        duration = time.perf_counter() - started
+        return ExportResult(
+            output_path=target,
+            file_size_bytes=target.stat().st_size if target.exists() else 0,
+            duration_seconds=duration,
+            row_count=_copy_row_count(rows),
+            status="success",
+        )
+
+    def export_report_to_csv(
+        self,
+        *,
+        table_name: str,
+        target: str | Path,
+        project_name: str,
+        report_type: str,
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+        limit: int | None = None,
+    ) -> ExportResult:
+        query, params, _ = self._report_query_sql(
+            table_name=table_name,
+            project_name=project_name,
+            report_type=report_type,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+        )
+        if limit is not None:
+            query = f"{query} LIMIT ?"
+            params = [*params, max(1, int(limit))]
+        return self.export_query_to_csv(query, Path(target), params=params, delimiter=";", header=True)
 
     def mark_reports_built(self, *, project_name: str, category_keys: list[str] | None = None) -> None:
         where = ["project_name = ?"]

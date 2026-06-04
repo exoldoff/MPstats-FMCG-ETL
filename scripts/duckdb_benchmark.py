@@ -14,6 +14,7 @@ import pandas as pd
 from duckdb_mock_data import DEFAULT_SIZES, generate_mock_csv
 
 
+BENCH_SIZE_ORDER = ("small", "medium", "large")
 MOCK_SCHEMA = """
 {
     'period': 'VARCHAR',
@@ -40,6 +41,8 @@ class BenchResult:
     rows: int | None
     comment: str
     risk: str
+    old_file_size_bytes: int | None = None
+    new_file_size_bytes: int | None = None
 
     @property
     def speedup(self) -> float | None:
@@ -56,6 +59,10 @@ def timed(fn: Callable[[], int | None]) -> tuple[float, int | None]:
     start = time.perf_counter()
     rows = fn()
     return time.perf_counter() - start, rows
+
+
+def file_size(path: Path) -> int | None:
+    return path.stat().st_size if path.exists() else None
 
 
 def connect(db_path: Path, *, threads: int | None = None, memory_limit: str | None = None, temp_directory: Path | None = None) -> duckdb.DuckDBPyConnection:
@@ -135,6 +142,23 @@ GROUP_QUERY = """
       AND network IN ('Ozon', 'Wildberries')
     GROUP BY period, category, network
     ORDER BY period, category, network
+"""
+
+REPORT_CSV_QUERY = """
+    SELECT
+        period,
+        category,
+        network,
+        brand,
+        sku,
+        COUNT(*) AS rows_count,
+        SUM(volume) AS total_volume,
+        SUM(price * volume) AS revenue,
+        AVG(price) AS avg_price
+    FROM products_new
+    WHERE period BETWEEN '2024-01' AND '2025-12'
+    GROUP BY period, category, network, brand, sku
+    ORDER BY revenue DESC NULLS LAST, period, category, network, brand, sku
 """
 
 JOIN_QUERY = """
@@ -299,27 +323,29 @@ def run_benchmark(
         new_csv = workdir / f"report_new_{size}.csv"
 
         def old_csv_export() -> int:
-            df = con.execute(GROUP_QUERY).fetchdf()
+            df = con.execute(REPORT_CSV_QUERY).fetchdf()
             df.to_csv(old_csv, sep=";", index=False, encoding="utf-8-sig")
             return len(df)
 
         old_csv_seconds, old_csv_rows = timed(old_csv_export)
 
         def new_csv_export() -> int:
-            con.execute(f"COPY ({GROUP_QUERY}) TO {sql_literal(str(new_csv))} WITH (FORMAT csv, DELIMITER ';', HEADER true)")
-            return int(new_csv.exists() and new_csv.stat().st_size > 0)
+            row = con.execute(f"COPY ({REPORT_CSV_QUERY}) TO {sql_literal(str(new_csv))} WITH (FORMAT csv, DELIMITER ';', HEADER true)").fetchone()
+            return int(row[0]) if row else 0
 
-        new_csv_seconds, _ = timed(new_csv_export)
+        new_csv_seconds, new_csv_rows = timed(new_csv_export)
         results.append(
             BenchResult(
-                "export_csv",
+                "report_csv_export",
                 "fetchdf -> df.to_csv",
                 "COPY (SELECT ...) TO CSV",
                 old_csv_seconds,
                 new_csv_seconds,
-                old_csv_rows,
-                "Direct export avoids pandas materialization.",
+                new_csv_rows,
+                "Direct report CSV export avoids pandas materialization.",
                 "COPY output has simpler formatting controls.",
+                old_file_size_bytes=file_size(old_csv),
+                new_file_size_bytes=file_size(new_csv),
             )
         )
 
@@ -391,6 +417,11 @@ def run_benchmark(
             "date_max": str(con.execute("SELECT MAX(date) FROM products_new").fetchone()[0]),
             "idempotent_inserted_again": inserted_again,
             "csv_export_exists": new_csv.exists() and new_csv.stat().st_size > 0,
+            "report_csv_rows_old": old_csv_rows,
+            "report_csv_rows_new": new_csv_rows,
+            "report_csv_old_size_bytes": file_size(old_csv),
+            "report_csv_new_size_bytes": file_size(new_csv),
+            "memory": "not_measured",
         }
 
     shutil.rmtree(workdir / "tmp_old", ignore_errors=True)
@@ -400,13 +431,16 @@ def run_benchmark(
 
 def markdown_table(results: list[BenchResult]) -> str:
     lines = [
-        "| operation | old method | new method | before, s | after, s | speedup | comment | risk |",
-        "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        "| operation | old method | new method | before, s | after, s | speedup | rows | old bytes | new bytes | comment | risk |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for item in results:
         before = "-" if item.old_seconds is None else f"{item.old_seconds:.4f}"
         after = "-" if item.new_seconds is None else f"{item.new_seconds:.4f}"
         speedup = "-" if item.speedup is None else f"{item.speedup:.2f}x"
+        rows = "-" if item.rows is None else str(item.rows)
+        old_bytes = "-" if item.old_file_size_bytes is None else str(item.old_file_size_bytes)
+        new_bytes = "-" if item.new_file_size_bytes is None else str(item.new_file_size_bytes)
         lines.append(
             "| "
             + " | ".join(
@@ -417,6 +451,9 @@ def markdown_table(results: list[BenchResult]) -> str:
                     before,
                     after,
                     speedup,
+                    rows,
+                    old_bytes,
+                    new_bytes,
                     item.comment.replace("|", "/"),
                     item.risk.replace("|", "/"),
                 ]
@@ -434,22 +471,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=int, default=None, help="DuckDB threads setting.")
     parser.add_argument("--memory-limit", default=None, help="DuckDB memory_limit setting, e.g. 4GB.")
     parser.add_argument("--skip-excel", action="store_true", help="Skip XLSX export benchmarks.")
+    parser.add_argument("--all-sizes", action="store_true", help="Run small, medium and large sizes in one pass.")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    rows = int(args.rows if args.rows is not None else DEFAULT_SIZES[args.size])
-    results, quality = run_benchmark(
-        workdir=args.workdir,
-        size=args.size,
-        rows=rows,
-        threads=args.threads,
-        memory_limit=args.memory_limit,
-        skip_excel=args.skip_excel,
-    )
+def write_outputs(*, workdir: Path, size: str, rows: int, results: list[BenchResult], quality: dict[str, object]) -> str:
     payload = {
-        "size": args.size,
+        "size": size,
         "rows": rows,
         "quality": quality,
         "results": [
@@ -460,13 +488,33 @@ def main() -> None:
             for item in results
         ],
     }
-    args.workdir.mkdir(parents=True, exist_ok=True)
-    (args.workdir / f"benchmark_{args.size}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / f"benchmark_{size}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report = markdown_table(results)
-    (args.workdir / f"benchmark_{args.size}.md").write_text(report + "\n", encoding="utf-8")
-    print(report)
-    print("\nQuality:")
-    print(json.dumps(quality, ensure_ascii=False, indent=2))
+    (workdir / f"benchmark_{size}.md").write_text(report + "\n", encoding="utf-8")
+    return report
+
+
+def main() -> None:
+    args = parse_args()
+    if args.all_sizes and args.rows is not None:
+        raise ValueError("--rows нельзя использовать вместе с --all-sizes.")
+    sizes = [size for size in BENCH_SIZE_ORDER if size in DEFAULT_SIZES] if args.all_sizes else [args.size]
+    for size in sizes:
+        rows = int(DEFAULT_SIZES[size] if args.all_sizes else args.rows if args.rows is not None else DEFAULT_SIZES[size])
+        results, quality = run_benchmark(
+            workdir=args.workdir,
+            size=size,
+            rows=rows,
+            threads=args.threads,
+            memory_limit=args.memory_limit,
+            skip_excel=args.skip_excel,
+        )
+        report = write_outputs(workdir=args.workdir, size=size, rows=rows, results=results, quality=quality)
+        print(f"\n## {size}: {rows:,} rows")
+        print(report)
+        print("\nQuality:")
+        print(json.dumps(quality, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
