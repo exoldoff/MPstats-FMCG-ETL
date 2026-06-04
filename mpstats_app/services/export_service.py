@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, date
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -14,7 +14,7 @@ import pandas as pd
 
 from mpstats_app.config import AppSettings
 from mpstats_app.repositories.duckdb_repository import DuckDbAppRepository
-from mpstats_app.utils import clean_records, clean_value
+from mpstats_app.utils import clean_records
 
 
 EXCEL_MAX_DATA_ROWS = 1_048_575
@@ -202,10 +202,7 @@ class ExportService:
         )
         estimated_files = self._estimate_file_count(spec, total, breakdown=breakdown)
         warnings = self._warnings_for_estimate(estimated_files)
-        if spec.export_format == "xlsx" and total > RAW_XLSX_EXPORT_ROW_LIMIT:
-            warnings.append(
-                f"Raw XLSX на {total} строк не строится. Используй Данные -> Отчёты: Excel получит агрегированную таблицу."
-            )
+        warnings.extend(self._xlsx_limit_warnings(spec=spec, total=total, breakdown=breakdown))
         return {
             "columns": spec.selected_columns,
             "rows": clean_records(df.where(pd.notna(df), None).to_dict(orient="records")),
@@ -251,11 +248,9 @@ class ExportService:
         total = self._total_from_breakdown(breakdown)
         if total <= 0:
             raise ValueError("Нет строк для выгрузки. Проверь категории, период и фильтры.")
-        if spec.export_format == "xlsx" and total > RAW_XLSX_EXPORT_ROW_LIMIT:
-            raise ValueError(
-                f"Raw XLSX на {total} строк не строится. Для больших категорий открой Данные -> Отчёты "
-                "и выгрузи агрегированную таблицу для Excel."
-            )
+        xlsx_limit_warnings = self._xlsx_limit_warnings(spec=spec, total=total, breakdown=breakdown)
+        if xlsx_limit_warnings:
+            raise ValueError(xlsx_limit_warnings[0])
 
         estimated_files = self._estimate_file_count(spec, total, breakdown=breakdown)
         if estimated_files > LARGE_EXPORT_FILE_WARNING and not confirm_large_export:
@@ -527,6 +522,27 @@ class ExportService:
     def _total_from_breakdown(breakdown: list[dict[str, Any]]) -> int:
         return sum(int(item.get("rows_count") or 0) for item in breakdown)
 
+    def _xlsx_limit_warnings(self, *, spec: ExportSpec, total: int, breakdown: list[dict[str, Any]]) -> list[str]:
+        if spec.export_format != "xlsx":
+            return []
+        if not spec.split_by_category:
+            if total > RAW_XLSX_EXPORT_ROW_LIMIT:
+                return [f"XLSX row limit exceeded ({total} rows), use CSV."]
+            return []
+        oversized = [
+            category
+            for category in self._selected_categories_from_breakdown(breakdown)
+            if int(category.get("rows_count") or 0) > RAW_XLSX_EXPORT_ROW_LIMIT
+        ]
+        if not oversized:
+            return []
+        labels = ", ".join(
+            f"{category.get('category_name') or category.get('category_key')} ({int(category.get('rows_count') or 0)} rows)"
+            for category in oversized[:5]
+        )
+        suffix = "" if len(oversized) <= 5 else f" и ещё {len(oversized) - 5}"
+        return [f"XLSX row limit exceeded for category file: {labels}{suffix}. Use CSV."]
+
     def _estimate_file_count(self, spec: ExportSpec, total: int, *, breakdown: list[dict[str, Any]] | None = None) -> int:
         if total <= 0:
             return 0
@@ -535,9 +551,9 @@ class ExportService:
                 return 1
             return len(self._selected_categories_from_breakdown(breakdown if breakdown is not None else self._breakdown(spec)))
         if not spec.split_by_category:
-            return math.ceil(total / EXCEL_MAX_DATA_ROWS)
+            return 1
         categories = self._selected_categories_from_breakdown(breakdown if breakdown is not None else self._breakdown(spec))
-        return sum(math.ceil(int(category.get("rows_count") or 0) / EXCEL_MAX_DATA_ROWS) for category in categories)
+        return len(categories)
 
     @staticmethod
     def _selected_categories_from_breakdown(breakdown: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -572,11 +588,11 @@ class ExportService:
         row_callback: Any | None = None,
         file_callback: Any | None = None,
     ) -> list[dict[str, Any]]:
-        parts = max(1, math.ceil(total_rows / EXCEL_MAX_DATA_ROWS)) if spec.export_format == "xlsx" else 1
+        parts = 1
         artifacts: list[dict[str, Any]] = []
         for part_index in range(parts):
-            base_offset = part_index * EXCEL_MAX_DATA_ROWS
-            rows_in_part = min(EXCEL_MAX_DATA_ROWS, total_rows - base_offset) if spec.export_format == "xlsx" else total_rows
+            base_offset = 0
+            rows_in_part = total_rows
             filename = self._filename(
                 spec=spec,
                 total_rows=total_rows,
@@ -607,44 +623,26 @@ class ExportService:
         return artifacts
 
     def _write_xlsx(self, *, target: Path, spec: ExportSpec, rows_in_part: int, base_offset: int, row_callback: Any | None = None) -> int:
-        try:
-            from openpyxl import Workbook
-            from openpyxl.utils import get_column_letter
-        except ModuleNotFoundError as exc:
-            raise ImportError("Для выгрузки XLSX нужен openpyxl. Установи зависимости проекта: pip install -r requirements.txt") from exc
-
-        workbook = Workbook(write_only=True)
-        worksheet = workbook.create_sheet("Данные")
-        worksheet.freeze_panes = "A2"
-        worksheet.append(spec.selected_columns)
-        written = 0
-        while written < rows_in_part:
-            batch_size = min(EXPORT_BATCH_SIZE, rows_in_part - written)
-            df = self.repository.fetch_export_products_dataframe(
-                table_name=self.settings.products_table,
-                project_name=spec.project_name,
-                output_columns=spec.selected_columns,
-                category_keys=spec.category_keys,
-                period_from_index=spec.period_from_index,
-                period_to_index=spec.period_to_index,
-                filters=spec.filters,
-                excluded_row_hashes=spec.excluded_row_hashes,
-                sort_column=spec.sort_column,
-                sort_direction=spec.sort_direction,
-                limit=batch_size,
-                offset=base_offset + written,
-                include_row_hash=False,
-            )
-            if df.empty:
-                break
-            for row in df.itertuples(index=False, name=None):
-                worksheet.append([_excel_value(value) for value in row])
-            written += len(df)
-            if row_callback:
-                row_callback(len(df), target.name)
-        if spec.selected_columns:
-            worksheet.auto_filter.ref = f"A1:{get_column_letter(len(spec.selected_columns))}{written + 1}"
-        workbook.save(target)
+        result = self.repository.export_products_flat(
+            table_name=self.settings.products_table,
+            target=target,
+            format="xlsx",
+            project_name=spec.project_name,
+            output_columns=spec.selected_columns,
+            category_keys=spec.category_keys,
+            period_from_index=spec.period_from_index,
+            period_to_index=spec.period_to_index,
+            filters=spec.filters,
+            excluded_row_hashes=spec.excluded_row_hashes,
+            sort_column=spec.sort_column,
+            sort_direction=spec.sort_direction,
+            default_order=bool(spec.sort_column),
+            limit=rows_in_part,
+            offset=base_offset,
+        )
+        written = int(result.row_count or rows_in_part)
+        if row_callback:
+            row_callback(written, target.name)
         return written
 
     def _write_csv(self, *, target: Path, spec: ExportSpec, rows_in_part: int, base_offset: int, row_callback: Any | None = None) -> int:
@@ -782,12 +780,3 @@ def _unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise FileExistsError(f"Не удалось подобрать свободное имя файла для {path}")
-
-
-def _excel_value(value: Any) -> Any:
-    if value is pd.NA:
-        return None
-    cleaned = clean_value(value)
-    if isinstance(cleaned, (datetime, date)):
-        return cleaned
-    return cleaned

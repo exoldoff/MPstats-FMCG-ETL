@@ -16,6 +16,7 @@ DuckDB remains the main local analytical engine. The current production workflow
 | CSV merge | Step 5 merge previously used `pandas.read_csv` for every parsed CSV, then `pd.concat(...).drop_duplicates()`. | Memory-heavy on many large parsed/classified CSV files. | Done: merge CSV via DuckDB temp tables and SQL dedup. |
 | XLSX export | openpyxl write-only mode is safe for formatted/sheet-controlled output. DuckDB Excel extension can write simple XLSX. | pandas/openpyxl should stay only on final aggregates or controlled batches. | Benchmark includes both simple DuckDB XLSX and pandas/openpyxl baseline. |
 | DB settings | Connections were created through several local helpers and one direct in-memory merge connection. | No central place for `threads`, `memory_limit`, `temp_directory`, read-only mode or operation timing. | Done: managed connection helper, transaction helper, timing logs and settings benchmark. |
+| Flat exports | Raw XLSX and report XLSX still used openpyxl/Python materialization, while CSV used DuckDB `COPY`. | CSV/XLSX could diverge and large flat XLSX pulled rows through Python. | Done: unified flat CSV/XLSX helper with DuckDB `COPY`, row-limit guard and openpyxl fallback only when Excel extension is unavailable. |
 
 ## Implemented changes
 
@@ -199,6 +200,95 @@ Writer-lock risk:
 - Two separate app processes or external scripts writing the same `mpstats.duckdb` can still conflict.
 - Read-only report/export queries reduce accidental writer use, but they do not make concurrent external writes safe.
 
+### Step 6: flat CSV/XLSX export via DuckDB COPY
+
+Export path audit:
+
+- Raw CSV export:
+  - already used `DuckDbAppRepository.export_products_to_csv(...)`;
+  - now routes through `export_products_flat(..., format="csv")` and `export_flat_query(...)`;
+  - stays DuckDB `COPY TO CSV` with delimiter `;` and BOM/header behavior preserved.
+- Raw XLSX export:
+  - previously used `ExportService._write_xlsx(...)` with openpyxl write-only batching and repeated `fetch_export_products_dataframe(...)`;
+  - now uses the same raw export SQL as raw CSV and writes through DuckDB `COPY ... FORMAT xlsx`;
+  - openpyxl is only fallback if `INSTALL/LOAD excel` or `COPY FORMAT xlsx` fails.
+- Report CSV export:
+  - already used `DuckDbAppRepository.export_report_to_csv(...)`;
+  - now routes through the same `export_flat_query(...)` helper.
+- Report XLSX export:
+  - previously used `fetch_report_dataframe(...)` and `ReportService._write_xlsx(...)`;
+  - now uses the same report SQL as report CSV and writes through DuckDB `COPY ... FORMAT xlsx`.
+- Preview paths:
+  - still fetch a small DataFrame for JSON rows in the web UI;
+  - not part of the large flat file export path.
+- Non-flat/simple-data paths left alone:
+  - classifier upload/classification XLSX handling;
+  - category/rules CSV writes;
+  - pipeline enrich/classification CSV generation;
+  - benchmark legacy baselines.
+
+Unified helper:
+
+- Added `DuckDbAppRepository.export_flat_query(...)`.
+- Inputs:
+  - `query`;
+  - `output_path`;
+  - `format`: `csv` or `xlsx`;
+  - optional params, delimiter, header and sheet name.
+- Outputs:
+  - path;
+  - format;
+  - duration seconds;
+  - file size;
+  - row count when known;
+  - status;
+  - fallback/error reason when fallback was used.
+
+CSV policy:
+
+- CSV stays direct DuckDB `COPY`.
+- Delimiter remains `;`.
+- Header+BOM behavior is preserved through the existing `PREFIX` strategy, so Excel-friendly opening stays the same.
+- CSV remains the recommended format above the Excel row limit.
+
+XLSX policy:
+
+- Main path:
+  - `INSTALL excel`;
+  - `LOAD excel`;
+  - `COPY (<query>) TO '<file.xlsx>' WITH (FORMAT xlsx, HEADER true, SHEET 'Data')`.
+- Fallback:
+  - if the DuckDB Excel extension path fails, the helper logs a warning and writes the same query with openpyxl streaming;
+  - fallback status is `fallback`, with the extension/COPY error stored in `ExportResult.error`;
+  - fallback is not the normal large export path.
+- No styles, freeze panes, filters, formulas, merged cells, extra sheets or formatting are added.
+
+Row limit policy:
+
+- Excel has 1,048,576 rows per sheet.
+- With a header row, the app allows up to 1,048,575 data rows in one XLSX.
+- If the flat XLSX query would export more rows, the helper raises: `XLSX row limit exceeded (... rows), use CSV.`
+- The app no longer creates automatic row-split XLSX parts. `Разными файлами по категориям` can still create separate flat files per selected category.
+
+Type casting policy for Excel pivots:
+
+- No DB schema changes.
+- Raw export query casts only the exported SELECT:
+  - sales/revenue/volume/price-like columns are `DOUBLE`;
+  - stores-count-like columns are `BIGINT`;
+  - date-like columns are `DATE`;
+  - timestamp-like columns are `TIMESTAMP`;
+  - text dimensions remain `VARCHAR`.
+- Report query already emits numeric aggregates (`SUM`, `COUNT`, arithmetic metrics) and year/month integers.
+- CSV and XLSX raw exports use the same typed SELECT, so row sets match across formats.
+
+DB impact:
+
+- No schema changes.
+- No migrations were added.
+- No new persistent DuckDB tables.
+- XLSX export may install/load the DuckDB Excel extension in the local DuckDB extension directory.
+
 ## Benchmark stand
 
 Artifacts:
@@ -235,6 +325,8 @@ python3 scripts/duckdb_benchmark.py --all-sizes --skip-excel
 python3 scripts/duckdb_benchmark.py --merge-only --all-sizes
 python3 scripts/duckdb_benchmark.py --merge-only --size large --include-large-merge
 python3 scripts/duckdb_benchmark.py --settings-only --size small --rows 50000 --settings-merge-size medium --skip-excel
+python3 scripts/duckdb_benchmark.py --flat-export-only --all-sizes
+python3 scripts/duckdb_benchmark.py --flat-export-only --size large --include-large-flat-export
 ```
 
 Outputs are written to `data/duckdb_benchmark/`:
@@ -246,6 +338,8 @@ Outputs are written to `data/duckdb_benchmark/`:
 - `benchmark_<size>.md`
 - `settings_benchmark.json`
 - `settings_benchmark.md`
+- `flat_export_benchmark.json`
+- `flat_export_benchmark.md`
 
 ## Benchmark results
 
@@ -376,6 +470,38 @@ Recommended local settings:
 - Use `DUCKDB_TEMP_DIRECTORY=/absolute/path/to/project/data/duckdb_tmp` when running large workloads and you want spills away from random system temp locations.
 - Do not run two write-capable app/script processes against the same `.duckdb` file.
 
+### Step 6 flat CSV/XLSX export results
+
+Step 6 local runs:
+
+- `python3 scripts/duckdb_benchmark.py --flat-export-only --size small --workdir data/duckdb_flat_export_benchmark_step6`
+- `python3 scripts/duckdb_benchmark.py --flat-export-only --size medium --workdir data/duckdb_flat_export_benchmark_step6_medium`
+
+Large flat export:
+
+- Not run by default.
+- Use `--flat-export-only --size large --include-large-flat-export` for the explicit 1,000,000-row XLSX benchmark.
+
+Benchmark operations:
+
+- old XLSX: openpyxl write-only streaming with `LIMIT/OFFSET` batches;
+- new XLSX: DuckDB `COPY ... FORMAT xlsx`;
+- CSV: DuckDB `COPY ... FORMAT csv`;
+- row-limit check: `range(1048577)` must refuse XLSX before creating a file.
+
+| size | rows | old XLSX openpyxl, s | new XLSX DuckDB COPY, s | XLSX speedup | CSV COPY, s | old XLSX rows | new XLSX rows | CSV rows | old XLSX bytes | new XLSX bytes | CSV bytes | xlsx opens | headers match | numeric cells | CSV rows match XLSX | row-limit error |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |
+| small | 9,989 | 0.8094 | 0.1082 | 7.48x | 0.0094 | 9,989 | 9,989 | 9,989 | 577,141 | 574,336 | 925,367 | true | true | true | true | XLSX row limit exceeded (1048577 rows), use CSV. |
+| medium | 499,496 | 33.7077 | 3.0476 | 11.06x | 0.1548 | 499,496 | 499,496 | 499,496 | 28,617,491 | 28,648,257 | 46,252,306 | true | true | true | true | XLSX row limit exceeded (1048577 rows), use CSV. |
+
+Notes:
+
+- DuckDB XLSX COPY is the clear winner for simple flat XLSX: `7.48x` on small and `11.06x` on medium.
+- CSV COPY remains much faster than XLSX and did not regress in the benchmark.
+- XLSX files open with openpyxl, headers match the SQL query and numeric cells read back as numeric Python values.
+- CSV and XLSX exported row counts match on the same query.
+- The row-limit guard refuses `1,048,577` rows and points users to CSV.
+
 Earlier Step 1/2 local runs:
 
 - `python3 scripts/duckdb_benchmark.py --size small --workdir data/duckdb_benchmark --skip-excel`
@@ -446,6 +572,8 @@ Current verification focus:
 5. Use direct DuckDB `COPY` for plain report CSV exports.
 6. Use DuckDB temp-table merge for standard step 5 parsed CSV merging.
 7. Keep DuckDB connection settings optional: no required env vars for default local run.
+8. Use one flat DuckDB `COPY` helper for raw/report CSV and XLSX.
+9. Keep XLSX simple: one sheet, header row, typed values, no styling/filtering.
 
 Verification smoke:
 
@@ -458,3 +586,7 @@ Verification smoke:
 - Report CSV export succeeds and does not call pandas `fetchdf()` for the final file.
 - Step 5 merge CSV succeeds and does not call pandas `concat()` for the directory merge path.
 - Optional `DUCKDB_THREADS`, `DUCKDB_MEMORY_LIMIT`, `DUCKDB_TEMP_DIRECTORY` settings are picked up by the shared connection helper.
+- Raw XLSX export succeeds without calling `fetch_export_products_dataframe()` for file writing.
+- Report XLSX export succeeds without calling `fetch_report_dataframe()` for file writing.
+- XLSX files open in Excel/openpyxl and numeric columns can be summed in pivots.
+- XLSX over the row limit is rejected with `XLSX row limit exceeded, use CSV`.

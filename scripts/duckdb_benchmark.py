@@ -31,6 +31,12 @@ MERGE_BENCH_SIZES = {
     "medium": {"files": 5, "rows_per_file": 500_000},
     "large": {"files": 8, "rows_per_file": 500_000},
 }
+FLAT_EXPORT_SIZES = {
+    "small": 10_000,
+    "medium": 500_000,
+    "large": 1_000_000,
+}
+XLSX_MAX_DATA_ROWS_WITH_HEADER = 1_048_575
 MOCK_SCHEMA = """
 {
     'period': 'VARCHAR',
@@ -113,6 +119,32 @@ class SettingsBenchResult:
     merge_output_rows: int | None
     report_csv_size_bytes: int | None
     merge_csv_size_bytes: int | None
+
+
+@dataclass(frozen=True)
+class FlatExportBenchResult:
+    size: str
+    rows: int
+    old_xlsx_seconds: float
+    new_xlsx_seconds: float | None
+    csv_seconds: float
+    old_xlsx_rows: int
+    new_xlsx_rows: int | None
+    csv_rows: int
+    old_xlsx_size_bytes: int | None
+    new_xlsx_size_bytes: int | None
+    csv_size_bytes: int | None
+    xlsx_opens: bool
+    headers_match: bool
+    numeric_cells: bool
+    csv_rows_match_xlsx: bool
+    row_limit_error: str | None = None
+
+    @property
+    def xlsx_speedup(self) -> float | None:
+        if self.new_xlsx_seconds is None or self.new_xlsx_seconds <= 0:
+            return None
+        return self.old_xlsx_seconds / self.new_xlsx_seconds
 
 
 def sql_literal(value: str) -> str:
@@ -326,6 +358,22 @@ REPORT_CSV_QUERY = """
     WHERE period BETWEEN '2024-01' AND '2025-12'
     GROUP BY period, category, network, brand, sku
     ORDER BY revenue DESC NULLS LAST, period, category, network, brand, sku
+"""
+
+FLAT_EXPORT_QUERY = """
+    SELECT
+        date,
+        period,
+        category,
+        network,
+        brand,
+        sku,
+        price,
+        volume,
+        stores_count,
+        price * volume AS revenue
+    FROM products_new
+    ORDER BY sku
 """
 
 JOIN_QUERY = """
@@ -724,6 +772,137 @@ def run_settings_benchmark(
     return results
 
 
+def old_openpyxl_flat_export(con: duckdb.DuckDBPyConnection, query: str, output_path: Path, *, batch_size: int = 50_000) -> int:
+    try:
+        from openpyxl import Workbook
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("openpyxl is required for old flat XLSX benchmark") from exc
+
+    metadata = con.execute(f"SELECT * FROM ({query}) AS flat_source LIMIT 0")
+    columns = [str(item[0]) for item in (metadata.description or [])]
+    workbook = Workbook(write_only=True)
+    worksheet = workbook.create_sheet("Data")
+    worksheet.append(columns)
+
+    written = 0
+    while True:
+        rows = con.execute(
+            f"SELECT * FROM ({query}) AS flat_source LIMIT ? OFFSET ?",
+            [int(batch_size), int(written)],
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            worksheet.append(list(row))
+        written += len(rows)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(output_path)
+    return written
+
+
+def duckdb_xlsx_flat_export(con: duckdb.DuckDBPyConnection, query: str, output_path: Path) -> int:
+    count_row = con.execute(f"SELECT COUNT(*) FROM ({query}) AS flat_source").fetchone()
+    rows = int(count_row[0]) if count_row else 0
+    if rows > XLSX_MAX_DATA_ROWS_WITH_HEADER:
+        raise ValueError(f"XLSX row limit exceeded ({rows} rows), use CSV.")
+    con.execute("INSTALL excel")
+    con.execute("LOAD excel")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    row = con.execute(
+        f"COPY ({query}) TO {sql_literal(str(output_path))} WITH (FORMAT xlsx, HEADER true, SHEET 'Data')"
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else rows
+
+
+def duckdb_csv_flat_export(con: duckdb.DuckDBPyConnection, query: str, output_path: Path) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    row = con.execute(
+        f"COPY ({query}) TO {sql_literal(str(output_path))} WITH (FORMAT csv, DELIMITER ';', HEADER true)"
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def validate_flat_xlsx(path: Path, *, expected_headers: list[str]) -> tuple[bool, bool, bool]:
+    try:
+        from openpyxl import load_workbook
+    except ModuleNotFoundError:
+        return False, False, False
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    worksheet = workbook.active
+    rows = worksheet.iter_rows(values_only=True)
+    headers = list(next(rows))
+    first_row = list(next(rows))
+    xlsx_opens = True
+    headers_match = headers == expected_headers
+    numeric_cells = isinstance(first_row[6], (int, float)) and isinstance(first_row[7], (int, float)) and isinstance(first_row[8], int) and isinstance(first_row[9], (int, float))
+    workbook.close()
+    return xlsx_opens, headers_match, numeric_cells
+
+
+def run_flat_export_benchmark(*, workdir: Path, size: str, rows: int) -> FlatExportBenchResult:
+    workdir.mkdir(parents=True, exist_ok=True)
+    csv_path = workdir / f"mock_flat_{size}_{rows}.csv"
+    if not csv_path.exists():
+        generate_mock_csv(csv_path, rows=rows)
+
+    db_path = workdir / f"flat_export_{size}.duckdb"
+    if db_path.exists():
+        db_path.unlink()
+    old_xlsx = workdir / f"flat_old_{size}.xlsx"
+    new_xlsx = workdir / f"flat_new_{size}.xlsx"
+    csv_output = workdir / f"flat_new_{size}.csv"
+    for path in (old_xlsx, new_xlsx, csv_output):
+        if path.exists():
+            path.unlink()
+
+    with connect(db_path, use_env=False) as con:
+        con.execute(f"CREATE OR REPLACE TABLE products_new AS {stage_select(csv_path)}")
+        expected_rows = int(con.execute("SELECT COUNT(*) FROM products_new").fetchone()[0])
+
+        old_xlsx_seconds, old_xlsx_rows = timed(lambda: old_openpyxl_flat_export(con, FLAT_EXPORT_QUERY, old_xlsx))
+
+        new_xlsx_seconds: float | None
+        new_xlsx_rows: int | None
+        try:
+            new_xlsx_seconds, new_xlsx_rows = timed(lambda: duckdb_xlsx_flat_export(con, FLAT_EXPORT_QUERY, new_xlsx))
+        except Exception:
+            new_xlsx_seconds = None
+            new_xlsx_rows = None
+
+        csv_seconds, csv_rows = timed(lambda: duckdb_csv_flat_export(con, FLAT_EXPORT_QUERY, csv_output))
+
+        row_limit_error = None
+        try:
+            duckdb_xlsx_flat_export(con, "SELECT range AS id FROM range(1048577)", workdir / "flat_row_limit_should_not_exist.xlsx")
+        except ValueError as exc:
+            row_limit_error = str(exc)
+
+    headers = ["date", "period", "category", "network", "brand", "sku", "price", "volume", "stores_count", "revenue"]
+    if new_xlsx.exists():
+        xlsx_opens, headers_match, numeric_cells = validate_flat_xlsx(new_xlsx, expected_headers=headers)
+    else:
+        xlsx_opens, headers_match, numeric_cells = False, False, False
+
+    return FlatExportBenchResult(
+        size=size,
+        rows=expected_rows,
+        old_xlsx_seconds=old_xlsx_seconds,
+        new_xlsx_seconds=new_xlsx_seconds,
+        csv_seconds=csv_seconds,
+        old_xlsx_rows=int(old_xlsx_rows or 0),
+        new_xlsx_rows=None if new_xlsx_rows is None else int(new_xlsx_rows),
+        csv_rows=int(csv_rows or 0),
+        old_xlsx_size_bytes=file_size(old_xlsx),
+        new_xlsx_size_bytes=file_size(new_xlsx),
+        csv_size_bytes=file_size(csv_output),
+        xlsx_opens=xlsx_opens,
+        headers_match=headers_match,
+        numeric_cells=numeric_cells,
+        csv_rows_match_xlsx=bool(new_xlsx_rows is not None and int(csv_rows or 0) == int(new_xlsx_rows)),
+        row_limit_error=row_limit_error,
+    )
+
+
 def markdown_table(results: list[BenchResult]) -> str:
     lines = [
         "| operation | old method | new method | before, s | after, s | speedup | rows | old bytes | new bytes | comment | risk |",
@@ -828,6 +1007,43 @@ def settings_markdown_table(results: list[SettingsBenchResult]) -> str:
     return "\n".join(lines)
 
 
+def flat_export_markdown_table(results: list[FlatExportBenchResult]) -> str:
+    lines = [
+        "| size | rows | old XLSX openpyxl, s | new XLSX DuckDB COPY, s | XLSX speedup | CSV COPY, s | old XLSX rows | new XLSX rows | CSV rows | old XLSX bytes | new XLSX bytes | CSV bytes | xlsx opens | headers match | numeric cells | CSV rows match XLSX | row-limit error |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |",
+    ]
+    for item in results:
+        new_xlsx_seconds = "-" if item.new_xlsx_seconds is None else f"{item.new_xlsx_seconds:.4f}"
+        speedup = "-" if item.xlsx_speedup is None else f"{item.xlsx_speedup:.2f}x"
+        new_xlsx_rows = "-" if item.new_xlsx_rows is None else str(item.new_xlsx_rows)
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    item.size,
+                    str(item.rows),
+                    f"{item.old_xlsx_seconds:.4f}",
+                    new_xlsx_seconds,
+                    speedup,
+                    f"{item.csv_seconds:.4f}",
+                    str(item.old_xlsx_rows),
+                    new_xlsx_rows,
+                    str(item.csv_rows),
+                    "-" if item.old_xlsx_size_bytes is None else str(item.old_xlsx_size_bytes),
+                    "-" if item.new_xlsx_size_bytes is None else str(item.new_xlsx_size_bytes),
+                    "-" if item.csv_size_bytes is None else str(item.csv_size_bytes),
+                    str(item.xlsx_opens).lower(),
+                    str(item.headers_match).lower(),
+                    str(item.numeric_cells).lower(),
+                    str(item.csv_rows_match_xlsx).lower(),
+                    "-" if item.row_limit_error is None else item.row_limit_error.replace("|", "/"),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
 def merge_sizes_for_args(*, size: str, all_sizes: bool, include_large_merge: bool) -> list[str]:
     if all_sizes:
         sizes = ["small", "medium"]
@@ -853,6 +1069,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--settings-only", action="store_true", help="Run DuckDB settings benchmark: default, threads, memory_limit and temp_directory.")
     parser.add_argument("--settings-merge-size", choices=sorted(MERGE_BENCH_SIZES), default="medium", help="Merge dataset size for --settings-only.")
     parser.add_argument("--settings-skip-merge", action="store_true", help="Skip merge operation inside --settings-only.")
+    parser.add_argument("--flat-export-only", action="store_true", help="Run flat CSV/XLSX export benchmark.")
+    parser.add_argument("--include-large-flat-export", action="store_true", help="Allow the large 1,000,000-row flat export benchmark.")
     return parser.parse_args()
 
 
@@ -891,10 +1109,46 @@ def write_settings_outputs(*, workdir: Path, size: str, rows: int, merge_size: s
     return report
 
 
+def write_flat_export_outputs(*, workdir: Path, results: list[FlatExportBenchResult]) -> str:
+    payload = {
+        "benchmark": "flat_export",
+        "results": [
+            {
+                **item.__dict__,
+                "xlsx_speedup": item.xlsx_speedup,
+            }
+            for item in results
+        ],
+    }
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "flat_export_benchmark.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report = flat_export_markdown_table(results)
+    (workdir / "flat_export_benchmark.md").write_text(report + "\n", encoding="utf-8")
+    return report
+
+
 def main() -> None:
     args = parse_args()
     if args.all_sizes and args.rows is not None:
         raise ValueError("--rows нельзя использовать вместе с --all-sizes.")
+    if args.flat_export_only:
+        if args.rows is not None and args.all_sizes:
+            raise ValueError("--rows нельзя использовать вместе с --flat-export-only --all-sizes.")
+        if args.all_sizes:
+            sizes = ["small", "medium"]
+            if args.include_large_flat_export:
+                sizes.append("large")
+        else:
+            if args.size == "large" and not args.include_large_flat_export:
+                raise ValueError("Flat export benchmark size=large запускается только с --include-large-flat-export.")
+            sizes = [args.size]
+        results = []
+        for size in sizes:
+            rows = int(args.rows if args.rows is not None else FLAT_EXPORT_SIZES[size])
+            results.append(run_flat_export_benchmark(workdir=args.workdir, size=size, rows=rows))
+        report = write_flat_export_outputs(workdir=args.workdir, results=results)
+        print(report)
+        return
     if args.settings_only:
         if args.all_sizes:
             raise ValueError("--settings-only запускается для одного --size.")

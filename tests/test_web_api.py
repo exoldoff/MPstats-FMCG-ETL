@@ -728,15 +728,20 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(client.get("/api/exports/templates", params={"project_name": "unit"}).json()["templates"], [])
 
                 output_dir = root / "exports"
-                built = client.post(
-                    "/api/exports/build",
-                    json={
-                        **preview_payload,
-                        "excluded_row_hashes": [excluded_hash],
-                        "output_dir": str(output_dir),
-                        "confirm_large_export": False,
-                    },
-                )
+                with patch.object(
+                    app.state.repository,
+                    "fetch_export_products_dataframe",
+                    side_effect=AssertionError("Raw XLSX export should use DuckDB COPY, not pandas/openpyxl batches."),
+                ):
+                    built = client.post(
+                        "/api/exports/build",
+                        json={
+                            **preview_payload,
+                            "excluded_row_hashes": [excluded_hash],
+                            "output_dir": str(output_dir),
+                            "confirm_large_export": False,
+                        },
+                    )
                 self.assertEqual(built.status_code, 200)
                 built_payload = built.json()
                 self.assertEqual(built_payload["total"], 1)
@@ -753,7 +758,9 @@ class WebApiTest(unittest.TestCase):
                 headers = [cell.value for cell in worksheet[1]]
                 self.assertEqual(headers, ["SKU", "Название", "Бренд", "Продажи, шт"])
                 self.assertNotIn("__row_hash", headers)
-                self.assertEqual(worksheet.auto_filter.ref, "A1:D2")
+                self.assertIsNone(worksheet.auto_filter.ref)
+                self.assertIsInstance(worksheet["D2"].value, (int, float))
+                self.assertEqual(worksheet["D2"].value, 5)
 
                 downloaded = client.get("/api/exports/download-file", params={"path": str(xlsx_path)})
                 self.assertEqual(downloaded.status_code, 200)
@@ -795,33 +802,30 @@ class WebApiTest(unittest.TestCase):
                 csv_text = csv_path.read_text(encoding="utf-8-sig")
                 self.assertIn("SKU;Название;Бренд;Продажи, шт", csv_text.splitlines()[0])
 
-                with patch("mpstats_app.services.export_service.EXCEL_MAX_DATA_ROWS", 1), patch(
-                    "mpstats_app.services.export_service.EXPORT_BATCH_SIZE", 1
-                ):
-                    split = client.post(
-                        "/api/exports/build",
-                        json={
-                            "project_name": "unit",
-                            "category_keys": ["lemon-oz", "soap-wb"],
-                            "period_from": "2025-01",
-                            "period_to": "2025-02",
-                            "selected_columns": ["SKU", "Название"],
-                            "filters": [],
-                            "excluded_row_hashes": [],
-                            "sort_column": "SKU",
-                            "sort_direction": "asc",
-                            "split_by_category": True,
-                            "output_dir": str(output_dir),
-                            "confirm_large_export": False,
-                        },
-                    )
+                split = client.post(
+                    "/api/exports/build",
+                    json={
+                        "project_name": "unit",
+                        "category_keys": ["lemon-oz", "soap-wb"],
+                        "period_from": "2025-01",
+                        "period_to": "2025-02",
+                        "selected_columns": ["SKU", "Название"],
+                        "filters": [],
+                        "excluded_row_hashes": [],
+                        "sort_column": "SKU",
+                        "sort_direction": "asc",
+                        "split_by_category": True,
+                        "output_dir": str(output_dir),
+                        "confirm_large_export": False,
+                    },
+                )
                 self.assertEqual(split.status_code, 200)
                 split_payload = split.json()
                 self.assertEqual(split_payload["total"], 3)
-                self.assertEqual(len(split_payload["artifacts"]), 3)
+                self.assertEqual(len(split_payload["artifacts"]), 2)
                 self.assertEqual(
                     sorted(item["category_key"] for item in split_payload["artifacts"]),
-                    ["lemon-oz", "lemon-oz", "soap-wb"],
+                    ["lemon-oz", "soap-wb"],
                 )
 
     def test_large_category_reports_build_aggregated_excel(self) -> None:
@@ -919,10 +923,15 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(preview_payload_response["rows"][0]["Выручка, руб"], 80)
                 self.assertEqual(preview_payload_response["rows"][0]["Объем, кг"], 4)
 
-                built = client.post(
-                    "/api/reports/build",
-                    json={**preview_payload, "output_dir": str(root / "reports")},
-                )
+                with patch.object(
+                    app.state.repository,
+                    "fetch_report_dataframe",
+                    side_effect=AssertionError("Report XLSX export should use DuckDB COPY, not pandas/openpyxl."),
+                ):
+                    built = client.post(
+                        "/api/reports/build",
+                        json={**preview_payload, "output_dir": str(root / "reports")},
+                    )
                 self.assertEqual(built.status_code, 200)
                 artifact = built.json()["artifacts"][0]
                 xlsx_path = Path(artifact["path"])
@@ -936,6 +945,8 @@ class WebApiTest(unittest.TestCase):
                 headers = [cell.value for cell in worksheet[1]]
                 self.assertIn("Бренд", headers)
                 self.assertIn("Продажи, шт", headers)
+                sales_column = headers.index("Продажи, шт") + 1
+                self.assertIsInstance(worksheet.cell(row=2, column=sales_column).value, (int, float))
                 downloaded = client.get("/api/reports/download-file", params={"path": str(xlsx_path)})
                 self.assertEqual(downloaded.status_code, 200)
 
@@ -1101,6 +1112,64 @@ class WebApiTest(unittest.TestCase):
                 with self.assertRaises(Exception):
                     repository.export_query_to_csv("SELECT missing_column FROM missing_table", root / "broken.csv")
             self.assertTrue(any("DuckDB COPY CSV export failed" in message for message in logs.output))
+
+    def test_flat_xlsx_helper_uses_duckdb_copy_and_preserves_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            target = root / "flat" / "typed.xlsx"
+            result = repository.export_query_to_xlsx(
+                "SELECT 1 AS id, 2.5 AS amount, DATE '2025-01-02' AS sold_at",
+                target,
+                sheet_name="Data",
+            )
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.format, "xlsx")
+            self.assertEqual(result.row_count, 1)
+            self.assertTrue(target.exists())
+
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(target, read_only=False)
+            worksheet = workbook.active
+            self.assertEqual([cell.value for cell in worksheet[1]], ["id", "amount", "sold_at"])
+            self.assertIsInstance(worksheet["A2"].value, int)
+            self.assertIsInstance(worksheet["B2"].value, float)
+            self.assertIsNotNone(worksheet["C2"].value)
+
+    def test_flat_xlsx_helper_row_limit_and_openpyxl_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            too_large = root / "flat" / "too-large.xlsx"
+            with self.assertRaisesRegex(ValueError, "XLSX row limit exceeded"):
+                repository.export_query_to_xlsx("SELECT range AS id FROM range(1048577)", too_large)
+            self.assertFalse(too_large.exists())
+
+            fallback_target = root / "flat" / "fallback.xlsx"
+            with patch.object(repository, "_load_excel_extension", side_effect=RuntimeError("extension unavailable")):
+                result = repository.export_query_to_xlsx(
+                    "SELECT 7 AS id, DATE '2025-01-03' AS sold_at",
+                    fallback_target,
+                )
+            self.assertEqual(result.status, "fallback")
+            self.assertIn("extension unavailable", result.error or "")
+            self.assertEqual(result.row_count, 1)
+
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(fallback_target, read_only=False)
+            worksheet = workbook.active
+            self.assertEqual([cell.value for cell in worksheet[1]], ["id", "sold_at"])
+            self.assertEqual(worksheet["A2"].value, 7)
 
     def test_workflow_categories_classify_preview_and_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

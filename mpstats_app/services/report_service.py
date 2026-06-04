@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 import re
 from typing import Any
@@ -11,7 +11,7 @@ import pandas as pd
 from mpstats_app.config import AppSettings
 from mpstats_app.repositories.duckdb_repository import HEAVY_CATEGORY_ROWS_LIMIT, HEAVY_SLICE_ROWS_LIMIT, DuckDbAppRepository
 from mpstats_app.services.export_service import EXCEL_MAX_DATA_ROWS
-from mpstats_app.utils import clean_records, clean_value
+from mpstats_app.utils import clean_records
 
 
 REPORT_FORMATS = {"xlsx", "csv"}
@@ -181,22 +181,28 @@ class ReportService:
             if total <= 0:
                 raise ValueError("Нет строк для отчёта. Проверь проект, период и категории.")
             if total > EXCEL_MAX_DATA_ROWS:
-                raise ValueError("Агрегированный отчёт всё ещё больше лимита Excel. Выбери CSV или сузь период/категории.")
+                raise ValueError(f"XLSX row limit exceeded ({total} rows), use CSV.")
 
             limit = spec.max_rows if spec.report_type == "top_sku" else None
-            df = self.repository.fetch_report_dataframe(
+            target = _unique_path(target_dir / self._filename(spec, rows=0))
+            export_result = self.repository.export_report_to_xlsx(
                 table_name=self.settings.products_table,
+                target=target,
                 project_name=spec.project_name,
                 report_type=spec.report_type,
                 category_keys=spec.category_keys,
                 period_from_index=spec.period_from_index,
                 period_to_index=spec.period_to_index,
                 limit=limit,
-                offset=0,
             )
-            target = _unique_path(target_dir / self._filename(spec, rows=len(df)))
-            self._write_xlsx(target, df)
-            written_rows = len(df)
+            written_rows = int(export_result.row_count or 0)
+            if written_rows <= 0:
+                target.unlink(missing_ok=True)
+                raise ValueError("Нет строк для отчёта. Проверь проект, период и категории.")
+            final_target = _unique_path(target_dir / self._filename(spec, rows=written_rows))
+            if final_target != target:
+                target.replace(final_target)
+                target = final_target
             source_total = total
             warnings = self._warnings(spec=spec, total=total)
 
@@ -285,25 +291,6 @@ class ReportService:
         return f"{_safe_filename(base)}.{spec.export_format}"
 
     @staticmethod
-    def _write_xlsx(target: Path, df: pd.DataFrame) -> None:
-        try:
-            from openpyxl import Workbook
-            from openpyxl.utils import get_column_letter
-        except ModuleNotFoundError as exc:
-            raise ImportError("Для отчётов XLSX нужен openpyxl. Установи зависимости проекта: pip install -r requirements.txt") from exc
-
-        workbook = Workbook(write_only=True)
-        worksheet = workbook.create_sheet("Отчёт")
-        worksheet.freeze_panes = "A2"
-        columns = [str(column) for column in df.columns]
-        worksheet.append(columns)
-        for row in df.itertuples(index=False, name=None):
-            worksheet.append([_excel_value(value) for value in row])
-        if columns:
-            worksheet.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(df) + 1}"
-        workbook.save(target)
-
-    @staticmethod
     def _warnings(*, spec: ReportSpec, total: int) -> list[str]:
         warnings: list[str] = []
         if spec.report_type == "top_sku" and total > spec.max_rows:
@@ -363,12 +350,3 @@ def _unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise FileExistsError(f"Не удалось подобрать свободное имя файла для {path}")
-
-
-def _excel_value(value: Any) -> Any:
-    if value is pd.NA:
-        return None
-    cleaned = clean_value(value)
-    if isinstance(cleaned, (datetime, date)):
-        return cleaned
-    return cleaned

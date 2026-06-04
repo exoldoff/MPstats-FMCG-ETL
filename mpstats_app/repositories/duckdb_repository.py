@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from threading import RLock
 import time
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import pandas as pd
@@ -51,6 +51,44 @@ REPORT_REVENUE_COLUMNS = ("Выручка, руб", "Выручка", "revenue")
 REPORT_VOLUME_KG_COLUMNS = ("Объем, кг", "Объём, кг", "volume_kg")
 REPORT_VOLUME_T_COLUMNS = ("Объем, т", "Объём, т", "volume_t")
 REPORT_CLASSIFICATION_COLUMNS = ("Тип", "Подкатегория", "Вид", "Вид мяса", "Сегмент")
+XLSX_MAX_DATA_ROWS_WITH_HEADER = 1_048_575
+RAW_EXPORT_DOUBLE_COLUMNS = (
+    "Продажи, шт",
+    "Продажи",
+    "Выручка, руб",
+    "Выручка",
+    "Объем, кг",
+    "Объём, кг",
+    "Объем, т",
+    "Объём, т",
+    "Объем",
+    "Объём",
+    "Средняя цена, руб",
+    "Средняя цена",
+    "Цена за кг",
+    "Цена",
+    "price",
+    "revenue",
+    "volume",
+    "volume_kg",
+    "volume_t",
+    "sales",
+)
+RAW_EXPORT_INTEGER_COLUMNS = (
+    "Количество магазинов",
+    "Кол-во магазинов",
+    "stores_count",
+)
+RAW_EXPORT_DATE_COLUMNS = (
+    "Дата",
+    "date",
+    "data_actual_until",
+)
+RAW_EXPORT_TIMESTAMP_COLUMNS = (
+    "Дата и время",
+    "datetime",
+    "timestamp",
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -61,6 +99,8 @@ class ExportResult:
     duration_seconds: float
     row_count: int | None
     status: str
+    format: str = "csv"
+    error: str | None = None
 
 
 def _table_column_types(con: Any, table_name: str) -> dict[str, str]:
@@ -302,6 +342,15 @@ def _copy_row_count(rows: list[Any]) -> int | None:
         return None
 
 
+def _copy_first_row_count(row: Any) -> int | None:
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_query_params(params: dict[str, Any] | list[Any] | tuple[Any, ...] | None) -> dict[str, Any] | list[Any]:
     if params is None:
         return []
@@ -315,6 +364,48 @@ def _validate_csv_delimiter(delimiter: str) -> str:
     if len(clean) != 1 or clean in {"\n", "\r"}:
         raise ValueError("CSV-разделитель должен быть одним символом без перевода строки.")
     return clean
+
+
+def _validate_sheet_name(sheet_name: str) -> str:
+    clean = str(sheet_name or "Data").strip() or "Data"
+    for forbidden in ("\\", "/", "?", "*", "[", "]", ":"):
+        clean = clean.replace(forbidden, "_")
+    return clean[:31] or "Data"
+
+
+def _query_params_with_limit(
+    params: dict[str, Any] | list[Any],
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[str, dict[str, Any] | list[Any]]:
+    if isinstance(params, dict):
+        next_params = dict(params)
+        next_params["__duckdb_limit"] = int(limit)
+        next_params["__duckdb_offset"] = int(offset)
+        return " LIMIT $__duckdb_limit OFFSET $__duckdb_offset", next_params
+    return " LIMIT ? OFFSET ?", [*params, int(limit), int(offset)]
+
+
+def _xlsx_cell_value(value: Any) -> Any:
+    if pd.isna(value):
+        return None
+    return value
+
+
+def _raw_export_column_expr(column: str) -> str:
+    quoted = quote_duckdb_name(column)
+    alias = quote_duckdb_name(column)
+    lower = column.casefold()
+    if column in RAW_EXPORT_INTEGER_COLUMNS or lower in {item.casefold() for item in RAW_EXPORT_INTEGER_COLUMNS}:
+        return f"TRY_CAST({_number_expr(column)} AS BIGINT) AS {alias}"
+    if column in RAW_EXPORT_DOUBLE_COLUMNS or lower in {item.casefold() for item in RAW_EXPORT_DOUBLE_COLUMNS}:
+        return f"TRY_CAST({_number_expr(column)} AS DOUBLE) AS {alias}"
+    if column in RAW_EXPORT_TIMESTAMP_COLUMNS or lower in {item.casefold() for item in RAW_EXPORT_TIMESTAMP_COLUMNS}:
+        return f"TRY_CAST(NULLIF(TRIM(CAST({quoted} AS VARCHAR)), '') AS TIMESTAMP) AS {alias}"
+    if column in RAW_EXPORT_DATE_COLUMNS or lower in {item.casefold() for item in RAW_EXPORT_DATE_COLUMNS} or ("дата" in lower and "время" not in lower):
+        return f"TRY_CAST(NULLIF(TRIM(CAST({quoted} AS VARCHAR)), '') AS DATE) AS {alias}"
+    return quoted
 
 
 def _period_index_to_label(index: int) -> str:
@@ -1921,6 +2012,145 @@ class DuckDbAppRepository:
         with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
             return con.execute(query, params).fetchdf()
 
+    def _load_excel_extension(self, con: Any) -> None:
+        con.execute("INSTALL excel")
+        con.execute("LOAD excel")
+
+    def _export_flat_query_with_openpyxl(
+        self,
+        con: Any,
+        *,
+        query: str,
+        output_path: Path,
+        params: dict[str, Any] | list[Any],
+        header: bool,
+        sheet_name: str,
+        row_count: int | None,
+        batch_size: int = 50_000,
+    ) -> int:
+        try:
+            from openpyxl import Workbook
+        except ModuleNotFoundError as exc:
+            raise ImportError("Для fallback XLSX нужен openpyxl. Установи зависимости проекта: pip install -r requirements.txt") from exc
+
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet(_validate_sheet_name(sheet_name))
+        metadata = con.execute(f"SELECT * FROM ({query}) AS flat_export_source LIMIT 0", params)
+        columns = [str(item[0]) for item in (metadata.description or [])]
+        if header:
+            worksheet.append(columns)
+
+        written = 0
+        total_rows = int(row_count or 0)
+        while True:
+            limit_sql, execute_params = _query_params_with_limit(params, limit=batch_size, offset=written)
+            result = con.execute(
+                f"SELECT * FROM ({query}) AS flat_export_source{limit_sql}",
+                execute_params,
+            )
+            rows = result.fetchall()
+            if not rows:
+                break
+            for row in rows:
+                worksheet.append([_xlsx_cell_value(value) for value in row])
+            written += len(rows)
+            if total_rows and written >= total_rows:
+                break
+
+        workbook.save(output_path)
+        return written
+
+    def export_flat_query(
+        self,
+        query: str,
+        output_path: Path,
+        format: Literal["csv", "xlsx"],
+        params: dict[str, Any] | list[Any] | None = None,
+        delimiter: str = ";",
+        header: bool = True,
+        sheet_name: str = "Data",
+    ) -> ExportResult:
+        target = Path(output_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        clean_format = str(format).lower()
+        if clean_format not in {"csv", "xlsx"}:
+            raise ValueError("Формат flat export должен быть csv или xlsx.")
+        clean_query = _clean_copy_query(query)
+        clean_delimiter = _validate_csv_delimiter(delimiter)
+        clean_sheet_name = _validate_sheet_name(sheet_name)
+        execute_params = _normalize_query_params(params)
+        started = time.perf_counter()
+        row_count: int | None = None
+        status = "success"
+        fallback_error: str | None = None
+        try:
+            with measure_duckdb_operation(
+                "export_flat_query",
+                {"db_path": self.settings.db_path, "file_path": target, "format": clean_format},
+            ) as metrics:
+                with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
+                    if clean_format == "csv":
+                        if header:
+                            metadata = con.execute(f"SELECT * FROM ({clean_query}) AS export_source LIMIT 0", execute_params)
+                            columns = [str(item[0]) for item in (metadata.description or [])]
+                            header_prefix = _csv_header_prefix(columns, delimiter=clean_delimiter)
+                            options = (
+                                f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, "
+                                f"PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')"
+                            )
+                        else:
+                            options = f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false)"
+                        rows = con.execute(
+                            f"COPY ({clean_query}) TO {sql_literal(str(target))} {options}",
+                            execute_params,
+                        ).fetchall()
+                        row_count = _copy_row_count(rows)
+                    else:
+                        count_row = con.execute(f"SELECT COUNT(*) FROM ({clean_query}) AS flat_export_source", execute_params).fetchone()
+                        row_count = int(count_row[0]) if count_row else 0
+                        max_rows = XLSX_MAX_DATA_ROWS_WITH_HEADER if header else 1_048_576
+                        if row_count > max_rows:
+                            raise ValueError(f"XLSX row limit exceeded ({row_count} rows), use CSV.")
+                        try:
+                            self._load_excel_extension(con)
+                            row = con.execute(
+                                f"""
+                                COPY ({clean_query}) TO {sql_literal(str(target))}
+                                WITH (FORMAT xlsx, HEADER {str(bool(header)).lower()}, SHEET {sql_literal(clean_sheet_name)})
+                                """,
+                                execute_params,
+                            ).fetchone()
+                            row_count = _copy_first_row_count(row) or row_count
+                        except Exception as exc:
+                            fallback_error = f"{type(exc).__name__}: {exc}"
+                            status = "fallback"
+                            LOGGER.warning("DuckDB XLSX COPY failed, falling back to openpyxl: %s", fallback_error)
+                            target.unlink(missing_ok=True)
+                            row_count = self._export_flat_query_with_openpyxl(
+                                con,
+                                query=clean_query,
+                                output_path=target,
+                                params=execute_params,
+                                header=header,
+                                sheet_name=clean_sheet_name,
+                                row_count=row_count,
+                            )
+                metrics["rows_exported"] = row_count
+                metrics["file_size_bytes"] = target.stat().st_size if target.exists() else 0
+        except Exception:
+            LOGGER.exception("DuckDB flat export failed: %s", target)
+            raise
+        duration = time.perf_counter() - started
+        return ExportResult(
+            output_path=target,
+            file_size_bytes=target.stat().st_size if target.exists() else 0,
+            duration_seconds=duration,
+            row_count=row_count,
+            status=status,
+            format=clean_format,
+            error=fallback_error,
+        )
+
     def export_query_to_csv(
         self,
         query: str,
@@ -1929,44 +2159,27 @@ class DuckDbAppRepository:
         delimiter: str = ";",
         header: bool = True,
     ) -> ExportResult:
-        target = Path(output_path).expanduser()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        clean_query = _clean_copy_query(query)
-        clean_delimiter = _validate_csv_delimiter(delimiter)
-        execute_params = _normalize_query_params(params)
-        started = time.perf_counter()
         try:
-            with measure_duckdb_operation(
-                "export_query_to_csv",
-                {"db_path": self.settings.db_path, "file_path": target},
-            ) as metrics:
-                with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
-                    if header:
-                        metadata = con.execute(f"SELECT * FROM ({clean_query}) AS export_source LIMIT 0", execute_params)
-                        columns = [str(item[0]) for item in (metadata.description or [])]
-                        header_prefix = _csv_header_prefix(columns, delimiter=clean_delimiter)
-                        options = (
-                            f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false, "
-                            f"PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')"
-                        )
-                    else:
-                        options = f"(FORMAT csv, DELIMITER {sql_literal(clean_delimiter)}, HEADER false)"
-                    rows = con.execute(
-                        f"COPY ({clean_query}) TO {sql_literal(str(target))} {options}",
-                        execute_params,
-                    ).fetchall()
-                metrics["rows_exported"] = _copy_row_count(rows)
-                metrics["file_size_bytes"] = target.stat().st_size if target.exists() else 0
+            return self.export_flat_query(query, output_path, "csv", params=params, delimiter=delimiter, header=header)
         except Exception:
-            LOGGER.exception("DuckDB COPY CSV export failed: %s", target)
+            LOGGER.exception("DuckDB COPY CSV export failed: %s", output_path)
             raise
-        duration = time.perf_counter() - started
-        return ExportResult(
-            output_path=target,
-            file_size_bytes=target.stat().st_size if target.exists() else 0,
-            duration_seconds=duration,
-            row_count=_copy_row_count(rows),
-            status="success",
+
+    def export_query_to_xlsx(
+        self,
+        query: str,
+        output_path: Path,
+        params: dict[str, Any] | list[Any] | None = None,
+        header: bool = True,
+        sheet_name: str = "Data",
+    ) -> ExportResult:
+        return self.export_flat_query(
+            query,
+            output_path,
+            "xlsx",
+            params=params,
+            header=header,
+            sheet_name=sheet_name,
         )
 
     def export_report_to_csv(
@@ -1992,7 +2205,32 @@ class DuckDbAppRepository:
         if limit is not None:
             query = f"{query} LIMIT ?"
             params = [*params, max(1, int(limit))]
-        return self.export_query_to_csv(query, Path(target), params=params, delimiter=";", header=True)
+        return self.export_flat_query(query, Path(target), "csv", params=params, delimiter=";", header=True, sheet_name="Data")
+
+    def export_report_to_xlsx(
+        self,
+        *,
+        table_name: str,
+        target: str | Path,
+        project_name: str,
+        report_type: str,
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+        limit: int | None = None,
+    ) -> ExportResult:
+        query, params, _ = self._report_query_sql(
+            table_name=table_name,
+            project_name=project_name,
+            report_type=report_type,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+        )
+        if limit is not None:
+            query = f"{query} LIMIT ?"
+            params = [*params, max(1, int(limit))]
+        return self.export_flat_query(query, Path(target), "xlsx", params=params, header=True, sheet_name="Data")
 
     def mark_reports_built(self, *, project_name: str, category_keys: list[str] | None = None) -> None:
         where = ["project_name = ?"]
@@ -2250,6 +2488,97 @@ class DuckDbAppRepository:
                 [*params, max(1, int(limit)), max(0, int(offset))],
             ).fetchdf()
 
+    def _export_products_query_sql(
+        self,
+        *,
+        table_name: str,
+        project_name: str,
+        output_columns: list[str],
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+        filters: list[dict[str, str]] | None = None,
+        excluded_row_hashes: list[str] | None = None,
+        sort_column: str | None = None,
+        sort_direction: str = "asc",
+        default_order: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[str, list[Any], list[str]]:
+        columns = self.table_columns(table_name)
+        self._require_export_metadata(columns)
+        selected_columns = self._safe_export_columns(columns, output_columns)
+        select_sql = ", ".join(_raw_export_column_expr(column) for column in selected_columns)
+        where_sql, params = self._export_where_sql(
+            columns=columns,
+            project_name=project_name,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+            filters=filters,
+            excluded_row_hashes=excluded_row_hashes,
+        )
+        order_sql = self._export_order_sql(
+            columns=columns,
+            sort_column=sort_column,
+            sort_direction=sort_direction,
+            default_order=default_order,
+        )
+        query = f"""
+            SELECT {select_sql}
+            FROM {quote_identifier(table_name)}
+            {where_sql}
+            {order_sql}
+        """
+        if limit is not None:
+            query = f"{query} LIMIT ? OFFSET ?"
+            params = [*params, max(1, int(limit)), max(0, int(offset))]
+        return query, params, selected_columns
+
+    def export_products_flat(
+        self,
+        *,
+        table_name: str,
+        target: str | Path,
+        format: Literal["csv", "xlsx"],
+        project_name: str,
+        output_columns: list[str],
+        category_keys: list[str] | None = None,
+        period_from_index: int | None = None,
+        period_to_index: int | None = None,
+        filters: list[dict[str, str]] | None = None,
+        excluded_row_hashes: list[str] | None = None,
+        sort_column: str | None = None,
+        sort_direction: str = "asc",
+        default_order: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> ExportResult:
+        query, params, _ = self._export_products_query_sql(
+            table_name=table_name,
+            project_name=project_name,
+            output_columns=output_columns,
+            category_keys=category_keys,
+            period_from_index=period_from_index,
+            period_to_index=period_to_index,
+            filters=filters,
+            excluded_row_hashes=excluded_row_hashes,
+            sort_column=sort_column,
+            sort_direction=sort_direction,
+            default_order=default_order,
+            limit=limit,
+            offset=offset,
+        )
+        return self.export_flat_query(
+            query,
+            Path(target),
+            format,
+            params=params,
+            delimiter=";",
+            header=True,
+            sheet_name="Data",
+        )
+
     def export_products_to_csv(
         self,
         *,
@@ -2266,48 +2595,22 @@ class DuckDbAppRepository:
         sort_direction: str = "asc",
         default_order: bool = False,
     ) -> Path:
-        columns = self.table_columns(table_name)
-        self._require_export_metadata(columns)
-        selected_columns = self._safe_export_columns(columns, output_columns)
-        select_sql = ", ".join(quote_duckdb_name(column) for column in selected_columns)
-        where_sql, params = self._export_where_sql(
-            columns=columns,
+        result = self.export_products_flat(
+            table_name=table_name,
+            target=target,
+            format="csv",
             project_name=project_name,
+            output_columns=output_columns,
             category_keys=category_keys,
             period_from_index=period_from_index,
             period_to_index=period_to_index,
             filters=filters,
             excluded_row_hashes=excluded_row_hashes,
-        )
-        order_sql = self._export_order_sql(
-            columns=columns,
             sort_column=sort_column,
             sort_direction=sort_direction,
             default_order=default_order,
         )
-        output_path = Path(target)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        header_prefix = _csv_header_prefix(selected_columns)
-        with measure_duckdb_operation(
-            "export_products_to_csv",
-            {"db_path": self.settings.db_path, "file_path": output_path, "table_name": table_name, "project_name": project_name},
-        ) as metrics:
-            with self._lock, connect(self.settings.db_path, read_only=True, temp_directory=self._duckdb_temp_directory()) as con:
-                row = con.execute(
-                    f"""
-                    COPY (
-                        SELECT {select_sql}
-                        FROM {quote_identifier(table_name)}
-                        {where_sql}
-                        {order_sql}
-                    ) TO {sql_literal(str(output_path))}
-                    (FORMAT csv, DELIMITER ';', HEADER false, PREFIX {sql_literal(header_prefix)}, SUFFIX '\n')
-                    """,
-                    params,
-                ).fetchone()
-            metrics["rows_exported"] = int(row[0]) if row else None
-            metrics["file_size_bytes"] = output_path.stat().st_size if output_path.exists() else 0
-        return output_path
+        return result.output_path
 
     def _report_query_sql(
         self,
