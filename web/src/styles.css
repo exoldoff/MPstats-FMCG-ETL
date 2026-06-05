@@ -391,6 +391,10 @@ select {
   gap: 8px;
 }
 
+.check-row.disabled {
+  opacity: 0.62;
+}
+
 .check-row input,
 .category-row input {
   width: 16px;

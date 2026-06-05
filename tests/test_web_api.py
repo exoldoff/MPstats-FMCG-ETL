@@ -71,6 +71,7 @@ def seed_project(root: Path) -> None:
                 ";Лимонная кислота;Озон;1;2025;2025;;Продукты/Тест/Лимонная кислота;;;;",
                 ";Лимонная кислота;WB;;2025;2025;;Продукты/Тест/WB;;;;",
                 ";Масло;WB;;2025;2025;;Продукты/Тест/Масло;\"\"\"Подсолнечное\"\"\";;;",
+                ";Яндекс тест;ЯМ;1;2025;2025;;Продукты/Тест/Яндекс;;;;",
                 ";Смена пути;WB;;янв.25;янв.25;;Продукты/Старый путь;;;;",
                 ";Смена пути;WB;;фев.25;фев.25;;Продукты/Новый путь;;;;",
                 ";Пустой путь;WB;;2025;2025;;НД;;;;",
@@ -1393,6 +1394,8 @@ class WebApiTest(unittest.TestCase):
                 lemon_wb = next(row for row in category_rows if row["category_name"] == "Лимонная кислота" and row["mp_code"] == "wb")
                 self.assertTrue(lemon_oz["fbs"])
                 self.assertFalse(lemon_wb["fbs"])
+                yandex_category = next(row for row in category_rows if row["category_name"] == "Яндекс тест")
+                self.assertFalse(yandex_category["fbs"])
                 oil = next(row for row in category_rows if row["category_name"] == "Масло")
                 self.assertIn("Подсолнечное", str(oil["filter_json"]))
                 switched = [row for row in category_rows if row["category_name"] == "Смена пути"]
@@ -1419,12 +1422,47 @@ class WebApiTest(unittest.TestCase):
                         "actualization": "",
                     }
                 )
+                source_rows.append(
+                    {
+                        "active": True,
+                        "category_name": "WB по умолчанию",
+                        "marketplace": "WB",
+                        "period_from": "2025",
+                        "period_to": "2025",
+                        "comment": "unit",
+                        "path": "Продукты/WB default",
+                        "filter_text": "",
+                        "path2": "",
+                        "filter2_text": "",
+                        "actualization": "",
+                    }
+                )
+                source_rows.append(
+                    {
+                        "active": True,
+                        "category_name": "Яндекс из UI",
+                        "marketplace": "ЯМ",
+                        "fbs": True,
+                        "period_from": "2025",
+                        "period_to": "2025",
+                        "comment": "unit",
+                        "path": "Продукты/YM",
+                        "filter_text": "",
+                        "path2": "",
+                        "filter2_text": "",
+                        "actualization": "",
+                    }
+                )
                 saved_source = client.put("/api/workflow/categories/source", json={"rows": source_rows})
                 self.assertEqual(saved_source.status_code, 200)
                 refreshed_categories = client.get("/api/workflow/categories").json()["categories"]
                 self.assertTrue(any(row["category_name"] == "Новая категория" for row in refreshed_categories))
                 new_category = next(row for row in refreshed_categories if row["category_name"] == "Новая категория")
                 self.assertTrue(new_category["fbs"])
+                wb_default = next(row for row in refreshed_categories if row["category_name"] == "WB по умолчанию")
+                self.assertTrue(wb_default["fbs"])
+                ym_from_ui = next(row for row in refreshed_categories if row["category_name"] == "Яндекс из UI")
+                self.assertFalse(ym_from_ui["fbs"])
                 new_filter = json.loads(new_category["filter_json"])
                 self.assertEqual(new_filter["name"]["operator"], "AND")
                 self.assertEqual(new_filter["name"]["condition1"]["type"], "contains")

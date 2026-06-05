@@ -218,12 +218,15 @@ class CategoryCatalogService:
                 raise ValueError(f"Строка справочника {index}: категория не заполнена.")
             if not marketplace:
                 raise ValueError(f"Строка справочника {index}: маркетплейс не заполнен.")
-            self._normalize_marketplace(marketplace)
+            _, mp_code = self._normalize_marketplace(marketplace)
+        else:
+            mp_code = ""
+        fbs = False if mp_code == "ym" else True if row.get("fbs") is None else bool(row.get("fbs", False))
         return {
             "Чек": "1" if bool(row.get("active", True)) else "0",
             "Категория": category_name,
             "МП": marketplace,
-            "FBS": "1" if bool(row.get("fbs", False)) else "",
+            "FBS": "1" if fbs else "",
             "От": str(row.get("period_from") or "").strip(),
             "До": str(row.get("period_to") or "").strip(),
             "Комментарий": str(row.get("comment") or "").strip(),
@@ -260,23 +263,29 @@ class CategoryCatalogService:
         return raw.strip().lower() in {"1", "1.0", "true", "yes", "y", "on", "да", "д", "истина"}
 
     def _row_uses_fbs(self, row: pd.Series, mp_code: str) -> bool:
+        if mp_code == "ym":
+            return False
         if "FBS" not in row:
-            return mp_code == "oz"
+            return True
         return self._is_truthy(self._cell(row, "FBS"))
 
     def _source_row_uses_fbs(self, row: pd.Series, source_has_fbs: bool) -> bool:
-        if source_has_fbs:
-            return self._is_truthy(self._cell(row, "FBS"))
         try:
             _, mp_code = self._normalize_marketplace(self._cell(row, "МП"))
         except ValueError:
             return False
-        return mp_code == "oz"
+        if mp_code == "ym":
+            return False
+        if source_has_fbs:
+            return self._is_truthy(self._cell(row, "FBS"))
+        return True
 
     @staticmethod
     def _category_uses_fbs(category: dict[str, Any]) -> bool:
+        if str(category.get("mp_code") or "") == "ym":
+            return False
         if category.get("fbs") is None:
-            return str(category.get("mp_code") or "") == "oz"
+            return True
         return bool(category.get("fbs"))
 
     def _source_score(self, path: Path) -> tuple[int, int, float]:

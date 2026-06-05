@@ -158,6 +158,10 @@ type PipelineOperation = {
 
 const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (сумм.)", "Подкатегория", "Тип", "Вид мяса"];
 
+function isYandexMarketplace(value: string) {
+  return ["ям", "яндекс", "яндекс маркет", "яндекс.маркет", "ym"].includes(value.trim().toLowerCase());
+}
+
 function editorSnapshot<T>(value: T): string {
   return JSON.stringify(value);
 }
@@ -1466,7 +1470,13 @@ export function App() {
   }
 
   function updateCatalogRow(id: string, patch: Partial<CategorySourceRow>) {
-    setCatalogRows((prev) => prev.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+    setCatalogRows((prev) => prev.map((row) => {
+      if (row.id !== id) return row;
+      const next = { ...row, ...patch };
+      if (patch.marketplace !== undefined) next.fbs = isYandexMarketplace(patch.marketplace) ? false : true;
+      if (isYandexMarketplace(next.marketplace)) next.fbs = false;
+      return next;
+    }));
   }
 
   function addCatalogRow() {
@@ -1476,7 +1486,7 @@ export function App() {
       active: true,
       category_name: "",
       marketplace: "WB",
-      fbs: false,
+      fbs: true,
       period_from: "",
       period_to: "",
       comment: "",
@@ -2414,10 +2424,10 @@ function FieldLabel(props: { text: string; hint: string }) {
   return <span className="field-label">{props.text}<Hint text={props.hint} /></span>;
 }
 
-function Toggle(props: { label: string; hint?: string; checked: boolean; onChange: (value: boolean) => void }) {
+function Toggle(props: { label: string; hint?: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
   return (
-    <label className="check-row">
-      <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
+    <label className={`check-row${props.disabled ? " disabled" : ""}`}>
+      <input type="checkbox" checked={props.checked} disabled={props.disabled} onChange={(event) => props.onChange(event.target.checked)} />
       {props.hint ? <FieldLabel text={props.label} hint={props.hint} /> : props.label}
     </label>
   );
@@ -3569,7 +3579,7 @@ function CategorySourceEditor(props: {
           <div className="editor-form">
             <SectionTitle icon={<Settings />} title="Строка справочника" hint="После сохранения путь и фильтр обновят список категорий для загрузки." />
             <Toggle label="Активна в приложении" checked={row.active} onChange={(value) => props.onChange(row.id, { active: value })} />
-            <Toggle label="FBS" checked={row.fbs} onChange={(value) => props.onChange(row.id, { fbs: value })} />
+            <Toggle label="FBS" hint="Выключать у нефудовых категорий. У Яндекс.Маркета FBS не используется." checked={isYandexMarketplace(row.marketplace) ? false : row.fbs} disabled={isYandexMarketplace(row.marketplace)} onChange={(value) => props.onChange(row.id, { fbs: value })} />
             <div className="form-grid two-cols">
               <label>Категория<input value={row.category_name} onChange={(event) => props.onChange(row.id, { category_name: event.target.value })} /></label>
               <label>Маркетплейс<select value={row.marketplace} onChange={(event) => props.onChange(row.id, { marketplace: event.target.value })}>{marketplaceOptions.map((option) => <option key={option}>{option}</option>)}</select></label>

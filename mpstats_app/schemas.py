@@ -79,7 +79,7 @@ class CategorySourceRowPayload(BaseModel):
     active: bool = True
     category_name: str = ""
     marketplace: str = ""
-    fbs: bool = False
+    fbs: bool | None = None
     period_from: str = ""
     period_to: str = ""
     comment: str = ""
