@@ -376,6 +376,71 @@ class WebApiTest(unittest.TestCase):
             self.assertEqual(total, 2)
             self.assertEqual(duplicate_hashes, 0)
 
+    def test_db_import_deduplicates_business_rows_across_source_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            category_file = root / "category.csv"
+            subject_file = root / "subject.csv"
+            duplicate_row = pd.DataFrame(
+                [
+                    {
+                        "Маркетплейс": "WB",
+                        "Категория": "Лимонная кислота",
+                        "SKU": "sku-1",
+                        "Название": "лимон дубль",
+                        "Бренд": "Brand",
+                        "Продажи, шт": "5",
+                        "Выручка, руб": "50",
+                    }
+                ]
+            )
+            write_semicolon_csv(duplicate_row, category_file)
+            write_semicolon_csv(duplicate_row, subject_file)
+
+            first_inserted = repository.import_products_file_idempotent(
+                run_id="run-category",
+                csv_path=category_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="wb",
+                category_key="category-key",
+                source_type="category",
+            )
+            with connect(settings.db_path) as con:
+                con.execute(f"UPDATE {settings.products_table} SET {quote_duckdb_name('__business_row_hash')} = NULL")
+            second_inserted = repository.import_products_file_idempotent(
+                run_id="run-subject",
+                csv_path=subject_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="wb",
+                category_key="subject-key",
+                source_type="subject",
+            )
+
+            self.assertEqual(first_inserted, 1)
+            self.assertEqual(second_inserted, 0)
+            with connect(settings.db_path) as con:
+                total = con.execute(f"SELECT COUNT(*) FROM {settings.products_table}").fetchone()[0]
+                source_types = con.execute(
+                    f"SELECT {quote_duckdb_name('__source_type')}, COUNT(*) FROM {settings.products_table} GROUP BY 1"
+                ).fetchall()
+                business_hashes = con.execute(
+                    f"SELECT COUNT(DISTINCT {quote_duckdb_name('__business_row_hash')}) FROM {settings.products_table}"
+                ).fetchone()[0]
+
+            self.assertEqual(total, 1)
+            self.assertEqual(source_types, [("category", 1)])
+            self.assertEqual(business_hashes, 1)
+
     def test_db_import_rolls_back_slice_replace_on_insert_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1464,6 +1529,7 @@ class WebApiTest(unittest.TestCase):
                     "/api/workflow/settings",
                     json={
                         "cookie": "session=test",
+                        "api_token": "api-token-test",
                         "project_name": "unit",
                         "workflow_mode": "historical_backfill",
                         "start_year": 2024,
@@ -1474,12 +1540,14 @@ class WebApiTest(unittest.TestCase):
                 )
                 self.assertEqual(settings_response.status_code, 200)
                 self.assertEqual(settings_response.json()["project_name"], "unit")
+                self.assertEqual(settings_response.json()["api_token"], "api-token-test")
                 self.assertEqual(settings_response.json()["start_year"], 2024)
                 self.assertEqual(settings_response.json()["end_month"], 5)
 
                 loaded_settings = client.get("/api/workflow/settings")
                 self.assertEqual(loaded_settings.status_code, 200)
                 self.assertEqual(loaded_settings.json()["workflow_mode"], "historical_backfill")
+                self.assertEqual(loaded_settings.json()["api_token"], "api-token-test")
                 self.assertEqual(loaded_settings.json()["start_month"], 1)
 
                 categories = client.get("/api/workflow/categories")
@@ -1490,9 +1558,12 @@ class WebApiTest(unittest.TestCase):
                 lemon_oz = next(row for row in category_rows if row["category_name"] == "Лимонная кислота" and row["mp_code"] == "oz")
                 lemon_wb = next(row for row in category_rows if row["category_name"] == "Лимонная кислота" and row["mp_code"] == "wb")
                 self.assertTrue(lemon_oz["fbs"])
+                self.assertEqual(lemon_oz["source_type"], "category")
                 self.assertFalse(lemon_wb["fbs"])
+                self.assertEqual(lemon_wb["source_type"], "category")
                 yandex_category = next(row for row in category_rows if row["category_name"] == "Яндекс тест")
                 self.assertFalse(yandex_category["fbs"])
+                self.assertEqual(yandex_category["source_type"], "category")
                 oil = next(row for row in category_rows if row["category_name"] == "Масло")
                 self.assertIn("Подсолнечное", str(oil["filter_json"]))
                 switched = [row for row in category_rows if row["category_name"] == "Смена пути"]
@@ -1509,6 +1580,7 @@ class WebApiTest(unittest.TestCase):
                         "category_name": "Новая категория",
                         "marketplace": "WB",
                         "fbs": True,
+                        "source_type": "subject",
                         "period_from": "2025",
                         "period_to": "2025",
                         "comment": "unit",
@@ -1524,6 +1596,7 @@ class WebApiTest(unittest.TestCase):
                         "active": True,
                         "category_name": "WB по умолчанию",
                         "marketplace": "WB",
+                        "source_type": "category",
                         "period_from": "2025",
                         "period_to": "2025",
                         "comment": "unit",
@@ -1540,6 +1613,7 @@ class WebApiTest(unittest.TestCase):
                         "category_name": "Яндекс из UI",
                         "marketplace": "ЯМ",
                         "fbs": True,
+                        "source_type": "subject",
                         "period_from": "2025",
                         "period_to": "2025",
                         "comment": "unit",
@@ -1556,10 +1630,18 @@ class WebApiTest(unittest.TestCase):
                 self.assertTrue(any(row["category_name"] == "Новая категория" for row in refreshed_categories))
                 new_category = next(row for row in refreshed_categories if row["category_name"] == "Новая категория")
                 self.assertTrue(new_category["fbs"])
+                self.assertEqual(new_category["source_type"], "subject")
                 wb_default = next(row for row in refreshed_categories if row["category_name"] == "WB по умолчанию")
                 self.assertTrue(wb_default["fbs"])
+                self.assertEqual(wb_default["source_type"], "category")
                 ym_from_ui = next(row for row in refreshed_categories if row["category_name"] == "Яндекс из UI")
                 self.assertFalse(ym_from_ui["fbs"])
+                self.assertEqual(ym_from_ui["source_type"], "category")
+                saved_header = (root / "Справочник категорий MP STATS.csv").read_text(encoding="utf-8-sig").splitlines()[0]
+                self.assertIn("Тип выгрузки", saved_header)
+                saved_rows = saved_source.json()["rows"]
+                saved_new_row = next(row for row in saved_rows if row["category_name"] == "Новая категория")
+                self.assertEqual(saved_new_row["source_type"], "subject")
                 new_filter = json.loads(new_category["filter_json"])
                 self.assertEqual(new_filter["name"]["operator"], "AND")
                 self.assertEqual(new_filter["name"]["condition1"]["type"], "contains")
@@ -1717,6 +1799,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(tasks_response.status_code, 200)
                 tasks = tasks_response.json()["tasks"]
                 self.assertEqual(len(tasks), 4)
+                self.assertEqual({task["source_type"] for task in tasks}, {"category"})
                 smart_pipeline = app.state.smart_pipeline_service
                 oz_task = next(task for task in tasks if task["marketplace_code"] == "oz")
                 wb_task = next(task for task in tasks if task["marketplace_code"] == "wb")

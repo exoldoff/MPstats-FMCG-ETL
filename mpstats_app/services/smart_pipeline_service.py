@@ -14,7 +14,14 @@ from uuid import uuid4
 
 from pipeline.repositories.file_repository import read_csv_auto, read_semicolon_csv, write_semicolon_csv
 from pipeline.services.classification_service import classify_file
-from pipeline.services.export_service import ExportSettings, build_session, export_one_month
+from pipeline.services.export_service import (
+    SOURCE_TYPE_SUBJECT,
+    ExportSettings,
+    build_api_session,
+    build_session,
+    export_one_month,
+    normalize_source_type,
+)
 from pipeline.services.standardize_service import standardize_dataframe
 from pipeline.services.weight_parser_service import parse_weights_dataframe
 
@@ -96,6 +103,10 @@ def category_uses_fbs(category: dict[str, Any]) -> bool:
     if category.get("fbs") is None:
         return str(category.get("mp_code") or "") == "oz"
     return bool(category.get("fbs"))
+
+
+def category_source_type(category: dict[str, Any]) -> str:
+    return normalize_source_type(category.get("source_type"))
 
 
 def safe_segment(value: str) -> str:
@@ -659,8 +670,13 @@ class SmartPipelineService:
         if raw_path.exists() and not settings.get("overwrite_raw"):
             self.repository.update_download_task(task_id, {"status": "downloaded", "download_status": "downloaded", "error_message": None})
             return
+        source_type = normalize_source_type(task.get("source_type"))
         cookie = self.repository.get_setting("mpstats_cookie") or ""
-        if not cookie.strip():
+        api_token = self.repository.get_setting("mpstats_api_token") or ""
+        if source_type == SOURCE_TYPE_SUBJECT:
+            if not api_token.strip():
+                raise ValueError("MPStats API token пустой. Сохрани token перед выгрузкой по предмету.")
+        elif not cookie.strip():
             raise ValueError("Cookie MPStats пустой. Сохрани доступ перед запуском.")
         self.repository.update_pipeline_run(str(task["run_id"]), {"current_step": f"Скачивание {task['category_name']} {ym(int(task['year']), int(task['month']))}"})
         self.repository.update_download_task(task_id, {"status": "downloading", "download_status": "downloading", "error_message": None})
@@ -674,8 +690,9 @@ class SmartPipelineService:
             extract_zip=True,
             cookie=cookie,
             tasks=[self._task_to_export_task(task)],
+            api_token=api_token,
         )
-        session = build_session(cookie)
+        session = build_api_session(api_token) if source_type == SOURCE_TYPE_SUBJECT else build_session(cookie)
         last_error: Exception | None = None
         for attempt in range(int(settings.get("retry_count") or 0) + 1):
             self._check_control(run_id)
@@ -821,6 +838,7 @@ class SmartPipelineService:
             month=int(task["month"]),
             marketplace_code=str(task["marketplace_code"]),
             category_key=str(task["category_key"]),
+            source_type=normalize_source_type(task.get("source_type")),
             overwrite=bool(settings.get("overwrite_db")),
         )
         self.repository.upsert_cube_entry(
@@ -830,6 +848,7 @@ class SmartPipelineService:
                 "month": int(task["month"]),
                 "marketplace": task["marketplace"],
                 "marketplace_code": task["marketplace_code"],
+                "source_type": normalize_source_type(task.get("source_type")),
                 "category_key": task["category_key"],
                 "category_name": task["category_name"],
                 "rows_count": inserted,
@@ -873,11 +892,13 @@ class SmartPipelineService:
         settings: dict[str, Any],
     ) -> dict[str, Any]:
         category_key = str(category["category_id"])
+        source_type = category_source_type(category)
         task_hash = hashlib.sha1(
             json.dumps(
                 {
                     "project_name": project_name,
                     "mp": category["mp_code"],
+                    "source_type": source_type,
                     "category_key": category_key,
                     "year": year,
                     "month": month,
@@ -904,6 +925,7 @@ class SmartPipelineService:
             "project_name": project_name,
             "marketplace": category["marketplace"],
             "marketplace_code": category["mp_code"],
+            "source_type": source_type,
             "category_name": category["category_name"],
             "category_path": category["path"],
             "category_id": category["category_id"],
@@ -1019,6 +1041,7 @@ class SmartPipelineService:
             "mp": task["marketplace_code"],
             "path": task["category_path"],
             "cat": task["category_name"],
+            "source_type": normalize_source_type(task.get("source_type")),
         }
         category = self.repository.get_categories_by_ids([str(task["category_id"])])
         if category and category_uses_fbs(category[0]):

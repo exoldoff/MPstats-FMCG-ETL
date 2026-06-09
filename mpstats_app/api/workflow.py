@@ -50,6 +50,7 @@ def put_settings(
 ) -> dict[str, object]:
     return workflow.save_settings(
         cookie=payload.cookie,
+        api_token=payload.api_token,
         project_name=payload.project_name,
         workflow_mode=payload.workflow_mode,
         start_year=payload.start_year,
@@ -97,6 +98,7 @@ def download(
         lambda: workflow.download(
             project_name=payload.project_name,
             cookie=payload.cookie,
+            api_token=payload.api_token,
             category_ids=payload.category_ids,
             start_year=payload.start_year,
             start_month=payload.start_month,

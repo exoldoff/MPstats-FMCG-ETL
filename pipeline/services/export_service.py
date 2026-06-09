@@ -24,6 +24,14 @@ EXPORT_ENDPOINTS = {
     "ym": "https://mpstats.io/api/ym/get/category",
 }
 
+SUBJECT_EXPORT_ENDPOINTS = {
+    "oz": "https://mpstats.io/api/analytics/v1/oz/niche/items",
+    "wb": "https://mpstats.io/api/analytics/v1/wb/subject/items",
+}
+
+SOURCE_TYPE_CATEGORY = "category"
+SOURCE_TYPE_SUBJECT = "subject"
+
 BASE_BODY = {
     "dataFilter": {},
     "filterModel": {},
@@ -55,6 +63,18 @@ BASE_BODY_YM_FIELDS = [
     "revenue",
 ]
 
+ANALYTICS_FIELDS = [
+    "id",
+    "brand",
+    "name",
+    "sales",
+    "seller",
+    "final_price_average",
+    "revenue",
+]
+
+ANALYTICS_PAGE_SIZE = 1000
+
 
 @dataclass(frozen=True)
 class ExportSettings:
@@ -64,6 +84,7 @@ class ExportSettings:
     extract_zip: bool
     cookie: str
     tasks: list[dict[str, Any]]
+    api_token: str = ""
 
 
 def load_export_settings(config_path: str | Path, *, default_save_dir: str | Path) -> ExportSettings:
@@ -76,6 +97,7 @@ def load_export_settings(config_path: str | Path, *, default_save_dir: str | Pat
         extract_zip=bool(runtime["EXTRACT_ZIP"]),
         cookie=str(runtime["COOKIE"]),
         tasks=list(runtime["TASKS"]),
+        api_token=str(runtime.get("API_TOKEN") or ""),
     )
 
 
@@ -274,6 +296,138 @@ def build_session(cookie: str) -> requests.Session:
     return session
 
 
+def build_api_session(api_token: str) -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "X-Mpstats-TOKEN": api_token,
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Origin": "https://mpstats.io",
+            "Referer": "https://mpstats.io/",
+        }
+    )
+    return session
+
+
+def normalize_source_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"subject", "предмет", "по предмету"}:
+        return SOURCE_TYPE_SUBJECT
+    return SOURCE_TYPE_CATEGORY
+
+
+def _clean_analytics_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if "name" in value:
+            return value["name"]
+        return "; ".join(f"{key}: {item}" for key, item in value.items())
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return value
+
+
+def _analytics_response_rows(data: Any) -> tuple[list[dict[str, Any]], int | None]:
+    if isinstance(data, dict):
+        rows = data.get("data")
+        if rows is None and isinstance(data.get("result"), dict):
+            rows = data["result"].get("data")
+        if rows is None:
+            rows = []
+        total = data.get("total")
+        if total is None and isinstance(data.get("result"), dict):
+            total = data["result"].get("total")
+        clean_rows = [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        try:
+            return clean_rows, int(total) if total is not None else None
+        except (TypeError, ValueError):
+            return clean_rows, None
+    if isinstance(data, list):
+        return [dict(row) for row in data if isinstance(row, dict)], None
+    return [], None
+
+
+def _write_analytics_csv(rows: list[dict[str, Any]], csv_path: Path, fields: list[str]) -> Path:
+    fieldnames: list[str] = []
+    for field in fields:
+        if field not in fieldnames:
+            fieldnames.append(field)
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _clean_analytics_value(row.get(key)) for key in fieldnames})
+    return csv_path
+
+
+def export_subject_month(
+    session: requests.Session,
+    settings: ExportSettings,
+    task: dict[str, Any],
+    *,
+    year: int,
+    month: int,
+    request_timeout: int = 300,
+) -> Path:
+    mp = str(task["mp"])
+    if mp not in SUBJECT_EXPORT_ENDPOINTS:
+        raise ValueError("Выгрузка по предмету доступна только для WB и Ozon.")
+    if not settings.api_token.strip():
+        raise ValueError("MPStats API token пустой. Заполни token перед выгрузкой по предмету.")
+
+    subject_path = str(task["path"])
+    fbs = int(task.get("fbs", 0))
+    cat = task.get("cat")
+    endpoint = SUBJECT_EXPORT_ENDPOINTS[mp]
+
+    d1, d2 = month_range(year, month)
+    d1s, d2s = ymd(d1), ymd(d2)
+    base_name = export_basename(mp, subject_path, d1s, d2s, cat=str(cat) if cat else None)
+
+    fields = list(task.get("fields") or ANALYTICS_FIELDS)
+    body: dict[str, Any] = {
+        "filterModel": task.get("filterModel") or {},
+        "sortModel": task.get("sortModel") or BASE_BODY["sortModel"],
+        "fields": fields,
+        "exportFileName": base_name,
+    }
+    params: dict[str, Any] = {
+        "path": subject_path,
+        "type": "json",
+        "d1": d1s,
+        "d2": d2s,
+    }
+    if fbs:
+        params["fbs"] = "1"
+
+    all_rows: list[dict[str, Any]] = []
+    total: int | None = None
+    start_row = 0
+    while True:
+        page_params = {**params, "startRow": start_row, "endRow": start_row + ANALYTICS_PAGE_SIZE}
+        response = session.post(endpoint, params=page_params, json=body, timeout=request_timeout)
+        response.raise_for_status()
+        page_rows, page_total = _analytics_response_rows(response.json())
+        all_rows.extend(page_rows)
+        total = page_total if page_total is not None else total
+        if not page_rows:
+            break
+        start_row += len(page_rows)
+        if total is not None and start_row >= total:
+            break
+        if len(page_rows) < ANALYTICS_PAGE_SIZE and total is None:
+            break
+
+    return _write_analytics_csv(all_rows, settings.save_dir / f"{base_name}.csv", fields)
+
+
 def export_one_month(
     session: requests.Session,
     settings: ExportSettings,
@@ -284,6 +438,16 @@ def export_one_month(
     max_wait_sec: int = 240,
     request_timeout: int = 300,
 ) -> Path:
+    if normalize_source_type(task.get("source_type")) == SOURCE_TYPE_SUBJECT:
+        return export_subject_month(
+            session,
+            settings,
+            task,
+            year=year,
+            month=month,
+            request_timeout=request_timeout,
+        )
+
     mp = str(task["mp"])
     category_path = str(task["path"])
     fbs = int(task.get("fbs", 0))
@@ -352,14 +516,23 @@ def run_export(settings: ExportSettings, *, log_dir: str | Path | None = None) -
     logger_path = logger.init()
     result = StepResult(name="step1_export", output=logger_path)
 
-    if not settings.cookie.strip():
-        raise ValueError("В step1 config пустой cookie. Заполните cookie перед выгрузкой MPStats.")
+    has_category_tasks = any(normalize_source_type(task.get("source_type")) == SOURCE_TYPE_CATEGORY for task in settings.tasks)
+    has_subject_tasks = any(normalize_source_type(task.get("source_type")) == SOURCE_TYPE_SUBJECT for task in settings.tasks)
+    if has_category_tasks and not settings.cookie.strip():
+        raise ValueError("В step1 config пустой cookie. Заполните cookie перед категорийной выгрузкой MPStats.")
+    if has_subject_tasks and not settings.api_token.strip():
+        raise ValueError("В step1 config пустой MPStats API token. Заполните token перед выгрузкой по предмету.")
 
-    session = build_session(settings.cookie)
+    category_session = build_session(settings.cookie) if has_category_tasks else None
+    subject_session = build_api_session(settings.api_token) if has_subject_tasks else None
     for task in settings.tasks:
         mp = str(task["mp"])
         category_path = str(task["path"])
         category = str(task.get("cat") or "")
+        source_type = normalize_source_type(task.get("source_type"))
+        session = subject_session if source_type == SOURCE_TYPE_SUBJECT else category_session
+        if session is None:
+            raise RuntimeError("Не удалось создать MPStats session для задачи.")
 
         for year in sorted(settings.export_months_by_year):
             for month in settings.export_months_by_year[year]:

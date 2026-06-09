@@ -16,8 +16,10 @@ from pipeline.services.enrich_service import (
     extract_first_date_from_filename,
     extract_marketplace_from_filename,
 )
+from pipeline.services.export_service import ExportSettings, build_api_session, export_one_month
 from pipeline.services.merge_service import merge_csv_files_with_duckdb, merge_dataframes, merge_directory
 from pipeline.services.run_service import parse_steps
+from pipeline.services.standardize_service import standardize_dataframe
 from scripts.classifier_perf_utils import classifier_sizes_for_args, compare_classified_outputs
 from scripts.duckdb_benchmark import merge_sizes_for_args
 
@@ -34,6 +36,116 @@ class PipelineServicesTest(unittest.TestCase):
         self.assertEqual(dt.strftime("%d.%m.%Y"), "01.06.2025")
         self.assertEqual(extract_marketplace_from_filename(filename), "Ozon")
         self.assertEqual(extract_category_from_filename(filename), "Мясо")
+
+    def test_subject_export_uses_analytics_api_pagination_and_token(self) -> None:
+        class FakeResponse:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return self.payload
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            save_dir = Path(temp_dir)
+            session = build_api_session("token-123")
+            settings = ExportSettings(
+                export_months_by_year={2025: (1,)},
+                save_dir=save_dir,
+                skip_if_exists=False,
+                extract_zip=True,
+                cookie="",
+                api_token="token-123",
+                tasks=[],
+            )
+            responses = [
+                FakeResponse(
+                    {
+                        "startRow": 0,
+                        "endRow": 1000,
+                        "total": 3,
+                        "data": [
+                            {"id": 1, "brand": "A", "name": "товар 1", "sales": 5, "seller": "S", "final_price_average": 10, "revenue": 50},
+                            {"id": 2, "brand": "B", "name": "товар 2", "sales": 7, "seller": "S", "final_price_average": 20, "revenue": 140},
+                        ],
+                    }
+                ),
+                FakeResponse(
+                    {
+                        "startRow": 2,
+                        "endRow": 1002,
+                        "total": 3,
+                        "data": [
+                            {"id": 3, "brand": "C", "name": "товар 3", "sales": 9, "seller": "S", "final_price_average": 30, "revenue": 270},
+                        ],
+                    }
+                ),
+            ]
+
+            with patch.object(session, "post", side_effect=responses) as post:
+                output = export_one_month(
+                    session,
+                    settings,
+                    {
+                        "mp": "wb",
+                        "path": "12345",
+                        "cat": "Предмет тест",
+                        "source_type": "subject",
+                        "filterModel": {"name": {"filterType": "text", "type": "contains", "filter": "товар"}},
+                    },
+                    year=2025,
+                    month=1,
+                )
+
+            self.assertEqual(session.headers["X-Mpstats-TOKEN"], "token-123")
+            self.assertEqual(post.call_count, 2)
+            first_call = post.call_args_list[0]
+            self.assertEqual(first_call.args[0], "https://mpstats.io/api/analytics/v1/wb/subject/items")
+            self.assertEqual(first_call.kwargs["params"]["path"], "12345")
+            self.assertEqual(first_call.kwargs["params"]["startRow"], 0)
+            self.assertEqual(first_call.kwargs["json"]["filterModel"]["name"]["filter"], "товар")
+            second_call = post.call_args_list[1]
+            self.assertEqual(second_call.kwargs["params"]["startRow"], 2)
+
+            self.assertTrue(output.name.endswith("__Предмет тест.csv"))
+            exported = read_semicolon_csv(output)
+            self.assertEqual(exported["id"].tolist(), [1, 2, 3])
+            self.assertEqual(exported["final_price_average"].tolist(), [10, 20, 30])
+
+            oz_session = build_api_session("token-123")
+            with patch.object(oz_session, "post", return_value=FakeResponse({"startRow": 0, "endRow": 1000, "total": 0, "data": []})) as oz_post:
+                export_one_month(
+                    oz_session,
+                    settings,
+                    {"mp": "oz", "path": "7502", "cat": "Ozon предмет", "source_type": "subject"},
+                    year=2025,
+                    month=1,
+                )
+            self.assertEqual(oz_post.call_args.args[0], "https://mpstats.io/api/analytics/v1/oz/niche/items")
+
+    def test_standardize_accepts_lowercase_analytics_columns(self) -> None:
+        source = pd.DataFrame(
+            [
+                {
+                    "id": 123,
+                    "brand": "Brand",
+                    "name": "товар",
+                    "sales": 5,
+                    "seller": "Seller",
+                    "final_price_average": 100,
+                    "revenue": 500,
+                }
+            ]
+        )
+
+        standardized = standardize_dataframe(source, "wb")
+
+        self.assertEqual(standardized.iloc[0]["SKU"], 123)
+        self.assertEqual(standardized.iloc[0]["Бренд"], "Brand")
+        self.assertEqual(standardized.iloc[0]["Название"], "товар")
+        self.assertEqual(standardized.iloc[0]["Средняя цена"], 100)
 
     def test_classification_preserves_date_column(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

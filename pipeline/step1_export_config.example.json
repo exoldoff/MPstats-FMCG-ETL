@@ -24,10 +24,12 @@
   "skip_if_exists": true,
   "extract_zip": true,
   "cookie": "",
+  "api_token": "",
   "tasks": [
     {
       "active": true,
       "mp": "oz",
+      "source_type": "category",
       "path": "Продукты питания/Мясо и птица",
       "cat": "Мясо",
       "fbs": 1

@@ -56,6 +56,7 @@ class WorkflowService:
     def get_settings(self) -> dict[str, Any]:
         return {
             "cookie": self.repository.get_setting("mpstats_cookie") or "",
+            "api_token": self.repository.get_setting("mpstats_api_token") or "",
             "project_name": self.repository.get_setting("project_name") or "mpstats",
             "workflow_mode": self.repository.get_setting("workflow_mode") or "historical_backfill",
             "start_year": self._optional_int_setting("start_year"),
@@ -68,6 +69,7 @@ class WorkflowService:
         self,
         *,
         cookie: str,
+        api_token: str | None = None,
         project_name: str,
         workflow_mode: str = "historical_backfill",
         start_year: int | None = None,
@@ -76,6 +78,8 @@ class WorkflowService:
         end_month: int | None = None,
     ) -> dict[str, Any]:
         self.repository.set_setting("mpstats_cookie", cookie)
+        if api_token is not None:
+            self.repository.set_setting("mpstats_api_token", api_token)
         self.repository.set_setting("project_name", project_name.strip() or "mpstats")
         self.repository.set_setting("workflow_mode", workflow_mode if workflow_mode in {"historical_backfill", "monthly_sync"} else "historical_backfill")
         for key, value in {
@@ -102,6 +106,7 @@ class WorkflowService:
         *,
         project_name: str,
         cookie: str,
+        api_token: str = "",
         category_ids: list[str],
         start_year: int,
         start_month: int,
@@ -112,7 +117,7 @@ class WorkflowService:
         tasks = self.catalog_service.selected_tasks(category_ids)
         if not tasks:
             raise ValueError("Выбери хотя бы одну категорию.")
-        self.save_settings(cookie=cookie, project_name=project_name)
+        self.save_settings(cookie=cookie, api_token=api_token, project_name=project_name)
         paths = PipelinePaths.create(project_root=self.settings.project_root, workdir=self.settings.workdir, project_name=project_name)
         paths.ensure_dirs()
         run_id = self._start_action(project_name, "download")
@@ -125,6 +130,7 @@ class WorkflowService:
                 extract_zip=True,
                 cookie=cookie,
                 tasks=tasks,
+                api_token=api_token,
             )
             result = run_export(settings, log_dir=paths.logs_dir)
             self._record_action_step(run_id, 1, result)

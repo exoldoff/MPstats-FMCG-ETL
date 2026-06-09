@@ -62,6 +62,7 @@ class SmartPlanService:
             "project_name": task["project_name"],
             "marketplace": task["marketplace"],
             "marketplace_code": task["marketplace_code"],
+            "source_type": task.get("source_type") or "category",
             "category_name": task["category_name"],
             "category_path": task["category_path"],
             "category_id": task["category_id"],

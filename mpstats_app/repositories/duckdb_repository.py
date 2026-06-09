@@ -30,7 +30,16 @@ from mpstats_app.utils import clean_record, clean_records, quote_duckdb_name
 
 
 SEARCH_COLUMNS = ("SKU", "Артикул", "Название", "Бренд", "Категория")
-EXPORT_METADATA_COLUMNS = ("__project_name", "__year", "__month", "__marketplace_code", "__category_key", "__row_hash")
+EXPORT_METADATA_COLUMNS = (
+    "__project_name",
+    "__year",
+    "__month",
+    "__marketplace_code",
+    "__source_type",
+    "__category_key",
+    "__row_hash",
+    "__business_row_hash",
+)
 TEXT_DB_TYPES = ("CHAR", "STRING", "TEXT", "VARCHAR")
 CUBE_SALES_FILTER_COLUMNS = ("Продажи, шт", "Продажи", "sales")
 CUBE_VOLUME_FILTER_COLUMNS = ("Объем, кг", "Объём, кг", "Объем, т", "Объём, т", "Объем", "Объём", "volume_kg", "volume_t", "volume")
@@ -42,8 +51,10 @@ IMPORT_METADATA_COLUMNS = (
     "__year",
     "__month",
     "__marketplace_code",
+    "__source_type",
     "__category_key",
     "__row_hash",
+    "__business_row_hash",
 )
 HEAVY_SLICE_ROWS_LIMIT = 250_000
 HEAVY_CATEGORY_ROWS_LIMIT = 1_000_000
@@ -183,12 +194,24 @@ def _positive_import_filter(columns: list[str]) -> str:
     return " AND ".join(filters) if filters else "TRUE"
 
 
-def _hash_expr(columns: list[str], *, project_name: str | None = None, year: int | None = None, month: int | None = None, marketplace_code: str | None = None, category_key: str | None = None) -> str:
+def _hash_expr(
+    columns: list[str],
+    *,
+    project_name: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    marketplace_code: str | None = None,
+    category_key: str | None = None,
+    table_alias: str | None = None,
+) -> str:
     parts: list[str] = []
     for value in (project_name, year, month, marketplace_code, category_key):
         if value is not None:
             parts.append(sql_literal(str(value)))
-    parts.extend(f"COALESCE(CAST({quote_duckdb_name(column)} AS VARCHAR), '<NULL>')" for column in columns)
+    parts.extend(
+        f"COALESCE(CAST({table_alias + '.' if table_alias else ''}{quote_duckdb_name(column)} AS VARCHAR), '<NULL>')"
+        for column in columns
+    )
     return "sha1(concat_ws('|', " + ", ".join(parts) + "))"
 
 
@@ -242,6 +265,7 @@ def _create_products_stage(
     year: int | None = None,
     month: int | None = None,
     marketplace_code: str | None = None,
+    source_type: str | None = None,
     category_key: str | None = None,
 ) -> list[str]:
     raw_table = f"{stage_table}_raw"
@@ -271,11 +295,17 @@ def _create_products_stage(
         select_parts.append(f"{int(month)} AS {quote_duckdb_name('__month')}")
     if marketplace_code is not None:
         select_parts.append(f"{sql_literal(marketplace_code)} AS {quote_duckdb_name('__marketplace_code')}")
+    if source_type is not None:
+        select_parts.append(f"{sql_literal(source_type)} AS {quote_duckdb_name('__source_type')}")
     if category_key is not None:
         select_parts.append(f"{sql_literal(category_key)} AS {quote_duckdb_name('__category_key')}")
     select_parts.append(
         f"{_hash_expr(source_columns, project_name=project_name, year=year, month=month, marketplace_code=marketplace_code, category_key=category_key)} "
         f"AS {quote_duckdb_name('__row_hash')}"
+    )
+    select_parts.append(
+        f"{_hash_expr(source_columns, project_name=project_name, year=year, month=month, marketplace_code=marketplace_code)} "
+        f"AS {quote_duckdb_name('__business_row_hash')}"
     )
     positive_filter = _positive_import_filter(source_columns)
     con.execute(
@@ -317,18 +347,85 @@ def _ensure_table_accepts_stage_columns(con: Any, *, table_name: str, quoted_tab
     return column_types
 
 
-def _insert_stage_sql(*, quoted_table: str, stage_table: str, columns: list[str], target_types: dict[str, str], deduplicate: bool) -> str:
+def _business_deduplicate_condition(*, quoted_table: str, stage_alias: str = "s") -> str:
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM {quoted_table} t
+            WHERE t.{quote_duckdb_name('__project_name')} = {stage_alias}.{quote_duckdb_name('__project_name')}
+              AND CAST(t.{quote_duckdb_name('__year')} AS INTEGER) = CAST({stage_alias}.{quote_duckdb_name('__year')} AS INTEGER)
+              AND CAST(t.{quote_duckdb_name('__month')} AS INTEGER) = CAST({stage_alias}.{quote_duckdb_name('__month')} AS INTEGER)
+              AND t.{quote_duckdb_name('__marketplace_code')} = {stage_alias}.{quote_duckdb_name('__marketplace_code')}
+              AND t.{quote_duckdb_name('__business_row_hash')} = {stage_alias}.{quote_duckdb_name('__business_row_hash')}
+        )
+    """
+
+
+def _business_columns(stage_columns: list[str]) -> list[str]:
+    metadata = set(IMPORT_METADATA_COLUMNS)
+    return [column for column in stage_columns if column not in metadata]
+
+
+def _backfill_business_row_hash(
+    con: Any,
+    *,
+    quoted_table: str,
+    stage_columns: list[str],
+    project_name: str,
+    year: int,
+    month: int,
+    marketplace_code: str,
+) -> None:
+    business_columns = _business_columns(stage_columns)
+    if not business_columns:
+        return
+    con.execute(
+        f"""
+        UPDATE {quoted_table} AS t
+        SET {quote_duckdb_name('__business_row_hash')} = {_hash_expr(
+            business_columns,
+            project_name=project_name,
+            year=year,
+            month=month,
+            marketplace_code=marketplace_code,
+            table_alias='t',
+        )}
+        WHERE t.{quote_duckdb_name('__project_name')} = ?
+          AND CAST(t.{quote_duckdb_name('__year')} AS INTEGER) = ?
+          AND CAST(t.{quote_duckdb_name('__month')} AS INTEGER) = ?
+          AND t.{quote_duckdb_name('__marketplace_code')} = ?
+          AND (
+              t.{quote_duckdb_name('__business_row_hash')} IS NULL
+              OR TRIM(CAST(t.{quote_duckdb_name('__business_row_hash')} AS VARCHAR)) = ''
+          )
+        """,
+        [project_name, int(year), int(month), marketplace_code],
+    )
+
+
+def _insert_stage_sql(
+    *,
+    quoted_table: str,
+    stage_table: str,
+    columns: list[str],
+    target_types: dict[str, str],
+    deduplicate: bool,
+    business_deduplicate: bool = False,
+) -> str:
     quoted_columns = ", ".join(quote_duckdb_name(column) for column in columns)
     selected_columns = ", ".join(f"{_cast_for_target_type(column, target_types[column], table_alias='s')} AS {quote_duckdb_name(column)}" for column in columns)
-    dedupe_sql = ""
+    conditions: list[str] = []
     if deduplicate:
-        dedupe_sql = f"""
-        WHERE NOT EXISTS (
+        conditions.append(
+            f"""NOT EXISTS (
             SELECT 1
             FROM {quoted_table} t
             WHERE t.{quote_duckdb_name('__row_hash')} = s.{quote_duckdb_name('__row_hash')}
+        )"""
         )
-        """
+    if business_deduplicate:
+        conditions.append(_business_deduplicate_condition(quoted_table=quoted_table).strip())
+    dedupe_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     return f"""
         INSERT INTO {quoted_table} ({quoted_columns})
         SELECT {selected_columns}
@@ -339,6 +436,19 @@ def _insert_stage_sql(*, quoted_table: str, stage_table: str, columns: list[str]
 
 def _stage_count(con: Any, stage_table: str) -> int:
     row = con.execute(f"SELECT COUNT(*) FROM {quote_identifier(stage_table)}").fetchone()
+    return int(row[0]) if row else 0
+
+
+def _stage_insertable_count(con: Any, *, quoted_table: str, stage_table: str, business_deduplicate: bool) -> int:
+    if not business_deduplicate:
+        return _stage_count(con, stage_table)
+    row = con.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {quote_identifier(stage_table)} s
+        WHERE {_business_deduplicate_condition(quoted_table=quoted_table).strip()}
+        """
+    ).fetchone()
     return int(row[0]) if row else 0
 
 
@@ -871,14 +981,15 @@ class DuckDbAppRepository:
             con.execute(
                 """
                 INSERT INTO app_category_catalog (
-                    category_id, category_name, marketplace, mp_code, path,
+                    category_id, category_name, marketplace, mp_code, source_type, path,
                     filter_json, fbs, period_from, period_to, source_file, is_active, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
                 ON CONFLICT (category_id) DO UPDATE SET
                     category_name = EXCLUDED.category_name,
                     marketplace = EXCLUDED.marketplace,
                     mp_code = EXCLUDED.mp_code,
+                    source_type = EXCLUDED.source_type,
                     path = EXCLUDED.path,
                     filter_json = EXCLUDED.filter_json,
                     fbs = EXCLUDED.fbs,
@@ -893,6 +1004,7 @@ class DuckDbAppRepository:
                     category["category_name"],
                     category["marketplace"],
                     category["mp_code"],
+                    category.get("source_type") or "category",
                     category["path"],
                     category.get("filter_json"),
                     category.get("fbs"),
@@ -1051,15 +1163,16 @@ class DuckDbAppRepository:
                 """
                 INSERT INTO download_tasks (
                     id, run_id, project_name, marketplace, marketplace_code,
-                    category_name, category_path, category_id, category_key,
+                    source_type, category_name, category_path, category_id, category_key,
                     year, month, status, download_status, process_status,
                     classify_status, save_status, raw_file_path, processed_file_path,
                     classified_file_path, rows_count, error_message, task_hash, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
                 ON CONFLICT (project_name, marketplace_code, category_key, year, month) DO UPDATE SET
                     run_id = EXCLUDED.run_id,
                     marketplace = EXCLUDED.marketplace,
+                    source_type = EXCLUDED.source_type,
                     category_name = EXCLUDED.category_name,
                     category_path = EXCLUDED.category_path,
                     category_id = EXCLUDED.category_id,
@@ -1082,6 +1195,7 @@ class DuckDbAppRepository:
                     task["project_name"],
                     task["marketplace"],
                     task["marketplace_code"],
+                    task.get("source_type") or "category",
                     task["category_name"],
                     task["category_path"],
                     task["category_id"],
@@ -1211,14 +1325,15 @@ class DuckDbAppRepository:
                 """
                 INSERT INTO cube_registry (
                     id, project_name, year, month, marketplace, marketplace_code,
-                    category_key, category_name, rows_count, saved_to_db_at,
+                    source_type, category_key, category_name, rows_count, saved_to_db_at,
                     source_processed_file_path, file_hash, days_loaded,
                     days_in_month, data_actual_until, data_mode, is_heavy,
                     heavy_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (project_name, year, month, marketplace_code, category_key) DO UPDATE SET
                     marketplace = EXCLUDED.marketplace,
+                    source_type = EXCLUDED.source_type,
                     category_name = EXCLUDED.category_name,
                     rows_count = EXCLUDED.rows_count,
                     saved_to_db_at = now(),
@@ -1238,6 +1353,7 @@ class DuckDbAppRepository:
                     int(entry["month"]),
                     entry["marketplace"],
                     entry["marketplace_code"],
+                    entry.get("source_type") or "category",
                     entry["category_key"],
                     entry["category_name"],
                     int(entry.get("rows_count") or 0),
@@ -1759,6 +1875,7 @@ class DuckDbAppRepository:
         month: int,
         marketplace_code: str,
         category_key: str,
+        source_type: str = "category",
         overwrite: bool = False,
         load_name: str | None = None,
     ) -> int:
@@ -1791,6 +1908,7 @@ class DuckDbAppRepository:
                         year=int(year),
                         month=int(month),
                         marketplace_code=marketplace_code,
+                        source_type=source_type,
                         category_key=category_key,
                     )
                     exists = table_exists(con, table_name)
@@ -1805,6 +1923,15 @@ class DuckDbAppRepository:
                             stage_table=stage_table,
                             stage_columns=stage_columns,
                         )
+                        _backfill_business_row_hash(
+                            con,
+                            quoted_table=quoted_table,
+                            stage_columns=stage_columns,
+                            project_name=project_name,
+                            year=int(year),
+                            month=int(month),
+                            marketplace_code=marketplace_code,
+                        )
                         con.execute(
                             f"""
                             DELETE FROM {quoted_table}
@@ -1816,7 +1943,12 @@ class DuckDbAppRepository:
                             """,
                             [project_name, int(year), int(month), marketplace_code, category_key],
                         )
-                        inserted = _stage_count(con, stage_table)
+                        inserted = _stage_insertable_count(
+                            con,
+                            quoted_table=quoted_table,
+                            stage_table=stage_table,
+                            business_deduplicate=True,
+                        )
                         con.execute(
                             _insert_stage_sql(
                                 quoted_table=quoted_table,
@@ -1824,6 +1956,7 @@ class DuckDbAppRepository:
                                 columns=stage_columns,
                                 target_types=target_types,
                                 deduplicate=False,
+                                business_deduplicate=True,
                             )
                         )
 

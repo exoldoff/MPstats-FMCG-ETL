@@ -96,6 +96,7 @@ class CategorySourceRowPayload(BaseModel):
     category_name: str = ""
     marketplace: str = ""
     fbs: bool | None = None
+    source_type: str = "category"
     period_from: str = ""
     period_to: str = ""
     comment: str = ""
@@ -112,6 +113,7 @@ class CategorySourcePayload(BaseModel):
 
 class AppSettingsPayload(BaseModel):
     cookie: str = ""
+    api_token: str = ""
     project_name: str = "mpstats"
     workflow_mode: str = "historical_backfill"
     start_year: int | None = None
@@ -123,6 +125,7 @@ class AppSettingsPayload(BaseModel):
 class DownloadPayload(BaseModel):
     project_name: str = "mpstats"
     cookie: str
+    api_token: str = ""
     category_ids: list[str]
     start_year: int
     start_month: int = Field(ge=1, le=12)

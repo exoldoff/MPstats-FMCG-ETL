@@ -453,6 +453,12 @@ label {
   font-size: 13px;
 }
 
+.field-block {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
 .field-label {
   display: inline-flex;
   align-items: center;
@@ -925,6 +931,66 @@ select {
   color: #38484d;
   font-style: normal;
   line-height: 1.35;
+}
+
+.source-claim {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: #395058;
+  background: #e9eef1;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.source-claim.subject {
+  color: #6e3f13;
+  background: #fff1d5;
+}
+
+.source-claim.category {
+  color: #17633c;
+  background: #e3f3ea;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+  border: 1px solid #cbd6d9;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.segmented-control button {
+  min-height: 38px;
+  border: 0;
+  border-right: 1px solid #cbd6d9;
+  border-radius: 0;
+  background: #fff;
+  color: #38484d;
+  font-weight: 800;
+}
+
+.segmented-control button:last-child {
+  border-right: 0;
+}
+
+.segmented-control button.active {
+  color: #17633c;
+  background: #e3f3ea;
+}
+
+.segmented-control button:disabled {
+  color: #9aa7ab;
+  background: #f2f5f6;
+  cursor: not-allowed;
 }
 
 .action-button {

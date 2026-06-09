@@ -29,11 +29,15 @@ MP_ALIASES = {
     "ym": ("Яндекс.Маркет", "ym"),
 }
 
+SOURCE_TYPE_CATEGORY = "category"
+SOURCE_TYPE_SUBJECT = "subject"
+
 SOURCE_COLUMNS = [
     "Чек",
     "Категория",
     "МП",
     "FBS",
+    "Тип выгрузки",
     "От",
     "До",
     "Комментарий",
@@ -132,6 +136,7 @@ class CategoryCatalogService:
                 "mp": category["mp_code"],
                 "path": category["path"],
                 "cat": category["category_name"],
+                "source_type": category.get("source_type") or SOURCE_TYPE_CATEGORY,
             }
             if self._category_uses_fbs(category):
                 task["fbs"] = 1
@@ -156,6 +161,7 @@ class CategoryCatalogService:
             marketplace, mp_code = self._normalize_marketplace(marketplace_raw)
             is_active = self._is_active(self._cell(row, "Чек"))
             fbs = self._row_uses_fbs(row, mp_code)
+            source_type = self._normalize_source_type(self._cell(row, "Тип выгрузки"), mp_code=mp_code)
             period_from = self._parse_period_month(self._cell(row, "От"), boundary="from")
             period_to = self._parse_period_month(self._cell(row, "До"), boundary="to")
             if period_from and period_to and period_from > period_to:
@@ -165,13 +171,14 @@ class CategoryCatalogService:
                 if not category_path or category_path.strip().lower() in {"нд", "n/a", "na", "-"}:
                     continue
                 filter_json = self._parse_filter(self._cell(row, filter_column))
-                category_id = self._category_id(name, mp_code, category_path, filter_json, period_from, period_to, fbs)
+                category_id = self._category_id(name, mp_code, category_path, filter_json, period_from, period_to, fbs, source_type)
                 out.append(
                     {
                         "category_id": category_id,
                         "category_name": name,
                         "marketplace": marketplace,
                         "mp_code": mp_code,
+                        "source_type": source_type,
                         "path": category_path,
                         "filter_json": filter_json,
                         "fbs": fbs,
@@ -198,6 +205,7 @@ class CategoryCatalogService:
                     "category_name": self._cell(row, "Категория"),
                     "marketplace": self._cell(row, "МП"),
                     "fbs": self._source_row_uses_fbs(row, source_has_fbs),
+                    "source_type": self._normalize_source_type(self._cell(row, "Тип выгрузки"), raw_marketplace=self._cell(row, "МП")),
                     "period_from": self._cell(row, "От"),
                     "period_to": self._cell(row, "До"),
                     "comment": self._cell(row, "Комментарий"),
@@ -222,11 +230,13 @@ class CategoryCatalogService:
         else:
             mp_code = ""
         fbs = False if mp_code == "ym" else True if row.get("fbs") is None else bool(row.get("fbs", False))
+        source_type = self._normalize_source_type(row.get("source_type"), mp_code=mp_code) if mp_code else SOURCE_TYPE_CATEGORY
         return {
             "Чек": "1" if bool(row.get("active", True)) else "0",
             "Категория": category_name,
             "МП": marketplace,
             "FBS": "1" if fbs else "",
+            "Тип выгрузки": "Предмет" if source_type == SOURCE_TYPE_SUBJECT else "Категория",
             "От": str(row.get("period_from") or "").strip(),
             "До": str(row.get("period_to") or "").strip(),
             "Комментарий": str(row.get("comment") or "").strip(),
@@ -279,6 +289,25 @@ class CategoryCatalogService:
         if source_has_fbs:
             return self._is_truthy(self._cell(row, "FBS"))
         return True
+
+    @staticmethod
+    def _normalize_source_type(
+        raw: Any,
+        *,
+        mp_code: str | None = None,
+        raw_marketplace: str | None = None,
+    ) -> str:
+        resolved_mp = mp_code
+        if resolved_mp is None and raw_marketplace:
+            try:
+                _, resolved_mp = CategoryCatalogService._normalize_marketplace(str(raw_marketplace))
+            except ValueError:
+                resolved_mp = None
+        text = str(raw or "").strip().lower()
+        source_type = SOURCE_TYPE_SUBJECT if text in {"subject", "предмет", "по предмету"} else SOURCE_TYPE_CATEGORY
+        if resolved_mp == "ym":
+            return SOURCE_TYPE_CATEGORY
+        return source_type
 
     @staticmethod
     def _category_uses_fbs(category: dict[str, Any]) -> bool:
@@ -431,18 +460,30 @@ class CategoryCatalogService:
         return tokens
 
     @staticmethod
-    def _category_id(name: str, mp_code: str, path: str, filter_json: str | None, period_from: str | None, period_to: str | None, fbs: bool) -> str:
+    def _category_id(
+        name: str,
+        mp_code: str,
+        path: str,
+        filter_json: str | None,
+        period_from: str | None,
+        period_to: str | None,
+        fbs: bool,
+        source_type: str = SOURCE_TYPE_CATEGORY,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "name": name,
+            "mp": mp_code,
+            "path": path,
+            "filter": filter_json or "",
+            "period_from": period_from or "",
+            "period_to": period_to or "",
+            "fbs": fbs,
+        }
+        if source_type == SOURCE_TYPE_SUBJECT:
+            payload["source_type"] = source_type
         digest = hashlib.sha1(
             json.dumps(
-                {
-                    "name": name,
-                    "mp": mp_code,
-                    "path": path,
-                    "filter": filter_json or "",
-                    "period_from": period_from or "",
-                    "period_to": period_to or "",
-                    "fbs": fbs,
-                },
+                payload,
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode("utf-8")

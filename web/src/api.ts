@@ -3,6 +3,7 @@ export type Category = {
   category_name: string;
   marketplace: string;
   mp_code: string;
+  source_type?: "category" | "subject" | string;
   path: string;
   filter_json?: string | null;
   fbs?: boolean | null;
@@ -16,6 +17,7 @@ export type CategorySourceRow = {
   category_name: string;
   marketplace: string;
   fbs: boolean;
+  source_type: "category" | "subject" | string;
   period_from: string;
   period_to: string;
   comment: string;
@@ -59,6 +61,7 @@ export type ManualOverride = {
 
 export type WorkflowSettings = {
   cookie: string;
+  api_token: string;
   project_name: string;
   workflow_mode?: "historical_backfill" | "monthly_sync" | string;
   start_year?: number | null;
@@ -144,6 +147,7 @@ export type DownloadTask = {
   project_name: string;
   marketplace: string;
   marketplace_code: string;
+  source_type?: "category" | "subject" | string;
   category_name: string;
   category_path: string;
   category_id: string;
@@ -177,6 +181,7 @@ export type SmartPlanTask = {
   project_name: string;
   marketplace: string;
   marketplace_code: string;
+  source_type?: "category" | "subject" | string;
   category_name: string;
   category_path: string;
   category_id: string;
@@ -293,6 +298,7 @@ export type CubeItem = {
   month: number;
   marketplace: string;
   marketplace_code: string;
+  source_type?: "category" | "subject" | string;
   category_key: string;
   category_name: string;
   rows_count: number;

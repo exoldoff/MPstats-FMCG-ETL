@@ -92,6 +92,13 @@ def _normalize_filter_model(value: object) -> dict[str, Any]:
     raise ValueError(f"Unsupported filterModel value: {value!r}")
 
 
+def _normalize_source_type(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"subject", "предмет", "по предмету"}:
+        return "subject"
+    return "category"
+
+
 def normalize_task(task: object) -> dict[str, Any]:
     if not isinstance(task, dict):
         raise ValueError("Task must be a dict")
@@ -111,7 +118,10 @@ def normalize_task(task: object) -> dict[str, Any]:
         "mp": mp,
         "path": path,
         "cat": cat,
+        "source_type": _normalize_source_type(task.get("source_type")),
     }
+    if out["source_type"] == "subject" and mp == "ym":
+        out["source_type"] = "category"
 
     if "fbs" in task and task.get("fbs") not in ("", None):
         out["fbs"] = int(task["fbs"])
@@ -141,6 +151,7 @@ def normalize_config(config: object) -> dict[str, Any]:
         "skip_if_exists": _to_bool(config.get("skip_if_exists"), default=True),
         "extract_zip": _to_bool(config.get("extract_zip"), default=True),
         "cookie": str(config.get("cookie", "")),
+        "api_token": str(config.get("api_token", "")),
         "tasks": tasks,
     }
 
@@ -161,6 +172,7 @@ def runtime_template_from_legacy(
         "skip_if_exists": _to_bool(skip_if_exists, default=True),
         "extract_zip": _to_bool(extract_zip, default=True),
         "cookie": "" if cookie is None else str(cookie),
+        "api_token": "",
         "tasks": [],
     }
     for task in raw_tasks:
@@ -215,6 +227,7 @@ def build_runtime_step1_settings(
             "mp": task["mp"],
             "path": task["path"],
             "cat": task["cat"],
+            "source_type": task.get("source_type") or "category",
         }
         if "fbs" in task:
             runtime_task["fbs"] = int(task["fbs"])
@@ -229,6 +242,7 @@ def build_runtime_step1_settings(
         "SKIP_IF_EXISTS": normalized["skip_if_exists"],
         "EXTRACT_ZIP": normalized["extract_zip"],
         "COOKIE": normalized["cookie"],
+        "API_TOKEN": normalized.get("api_token", ""),
         "TASKS": active_tasks,
     }
 
@@ -295,6 +309,7 @@ def load_tasks_from_archive(archive_path: str | Path) -> list[dict[str, Any]]:
                 "mp": normalized["mp"],
                 "path": normalized["path"],
                 "cat": normalized["cat"],
+                "source_type": normalized.get("source_type", "category"),
                 "fbs": normalized.get("fbs"),
                 "filterModel": normalized.get("filterModel", {}),
             },

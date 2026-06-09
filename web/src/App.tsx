@@ -128,6 +128,10 @@ const ruleModes = [
 ];
 
 const marketplaceOptions = ["Озон", "WB", "ЯМ"];
+const sourceTypeOptions = [
+  ["category", "По категории"],
+  ["subject", "По предмету"]
+] as const;
 const catalogFilterTypes = [
   ["contains", "Содержит"],
   ["notContains", "Исключает"]
@@ -162,6 +166,14 @@ const commonClassifierColumns = ["Название", "SKU", "Артикул", "�
 
 function isYandexMarketplace(value: string) {
   return ["ям", "яндекс", "яндекс маркет", "яндекс.маркет", "ym"].includes(value.trim().toLowerCase());
+}
+
+function normalizeSourceType(value: string | null | undefined) {
+  return value === "subject" ? "subject" : "category";
+}
+
+function sourceTypeLabel(value: string | null | undefined) {
+  return normalizeSourceType(value) === "subject" ? "по предмету" : "по категории";
 }
 
 function editorSnapshot<T>(value: T): string {
@@ -460,6 +472,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>("plan");
   const [projectName, setProjectName] = useState("mpstats");
   const [cookie, setCookie] = useState("");
+  const [apiToken, setApiToken] = useState("");
   const [startYear, setStartYear] = useState(current.year);
   const [startMonth, setStartMonth] = useState(1);
   const [endYear, setEndYear] = useState(current.year);
@@ -639,6 +652,7 @@ export function App() {
       setProjectName(settings.project_name || "mpstats");
       loadedProjectName = settings.project_name || "mpstats";
       setCookie(settings.cookie || "");
+      setApiToken(settings.api_token || "");
       if (settings.workflow_mode === "historical_backfill" || settings.workflow_mode === "monthly_sync") {
         setMode(settings.workflow_mode);
       }
@@ -799,6 +813,7 @@ export function App() {
       setProducts(null);
       const settings = await api.saveWorkflowSettings({
         cookie,
+        api_token: apiToken,
         project_name: "mpstats",
         workflow_mode: mode,
         start_year: startYear,
@@ -1239,7 +1254,7 @@ export function App() {
     const text = categoryQuery.trim().toLowerCase();
     const filtered = categories.filter((category) => {
       if (!text) return true;
-      return `${category.category_name} ${category.marketplace} ${category.path} ${category.period_from ?? ""} ${category.period_to ?? ""}`.toLowerCase().includes(text);
+      return `${category.category_name} ${category.marketplace} ${category.path} ${sourceTypeLabel(category.source_type)} ${category.period_from ?? ""} ${category.period_to ?? ""}`.toLowerCase().includes(text);
     });
     const groups = new Map<string, Category[]>();
     for (const category of filtered) {
@@ -1252,7 +1267,7 @@ export function App() {
   const filteredCatalogRows = useMemo(() => {
     const text = catalogQuery.trim().toLowerCase();
     if (!text) return catalogRows;
-    return catalogRows.filter((row) => `${row.category_name} ${row.marketplace} ${row.path} ${row.filter_text}`.toLowerCase().includes(text));
+    return catalogRows.filter((row) => `${row.category_name} ${row.marketplace} ${row.path} ${row.filter_text} ${sourceTypeLabel(row.source_type)}`.toLowerCase().includes(text));
   }, [catalogRows, catalogQuery]);
   const selectedCatalogRow = useMemo(() => catalogRows.find((row) => row.id === selectedCatalogId) ?? catalogRows[0] ?? null, [catalogRows, selectedCatalogId]);
   const classifierCategoryOptions = useMemo(() => {
@@ -1545,7 +1560,13 @@ export function App() {
       if (row.id !== id) return row;
       const next = { ...row, ...patch };
       if (patch.marketplace !== undefined) next.fbs = isYandexMarketplace(patch.marketplace) ? false : true;
-      if (isYandexMarketplace(next.marketplace)) next.fbs = false;
+      if (isYandexMarketplace(next.marketplace)) {
+        next.fbs = false;
+        next.source_type = "category";
+      }
+      if (normalizeSourceType(next.source_type) === "subject" && isYandexMarketplace(next.marketplace)) {
+        next.source_type = "category";
+      }
       return next;
     }));
   }
@@ -1558,6 +1579,7 @@ export function App() {
       category_name: "",
       marketplace: "WB",
       fbs: true,
+      source_type: "category",
       period_from: "",
       period_to: "",
       comment: "",
@@ -1763,6 +1785,7 @@ export function App() {
   function workflowSettingsPayload(targetProjectName = projectName) {
     return {
       cookie,
+      api_token: apiToken,
       project_name: targetProjectName,
       workflow_mode: mode,
       start_year: startYear,
@@ -1905,10 +1928,14 @@ export function App() {
                 <FieldLabel text="MPStats cookie" hint="Cookie текущей авторизованной сессии MPStats. Нужен только для скачивания; если устарел, задачи будут падать с ошибкой доступа." />
                 <textarea className="cookie-input" value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder="Вставь cookie из MPStats" />
               </label>
+              <label>
+                <FieldLabel text="MPStats API token" hint="Токен официального Analytics API MPStats. Нужен только для режима загрузки по предмету у WB и Ozon." />
+                <input type="password" value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder="Вставь API token для предметов" />
+              </label>
             </div>
             <button
               className="primary-button"
-              title="Сохраняет project name, cookie, период, режим и настройки pipeline в локальную DuckDB."
+              title="Сохраняет project name, cookie, API token, период, режим и настройки pipeline в локальную DuckDB."
               onClick={() =>
                 void runAction("Сохранение настроек", async () => {
                   await saveCurrentWorkflowSettings();
@@ -2046,6 +2073,7 @@ export function App() {
                           <span>
                             <strong>{category.marketplace}</strong>
                             <em>{category.path}</em>
+                            <small className={`source-claim ${normalizeSourceType(category.source_type)}`}>{sourceTypeLabel(category.source_type)}</small>
                             {categoryFbsLabel(category) ? <small>{categoryFbsLabel(category)}</small> : null}
                             <small>{categoryPeriodLabel(category)}</small>
                           </span>
@@ -2651,6 +2679,28 @@ function Toggle(props: { label: string; hint?: string; checked: boolean; disable
   );
 }
 
+function SourceTypeSegmented(props: { value: string; disabledSubject: boolean; onChange: (value: "category" | "subject") => void }) {
+  const value = normalizeSourceType(props.value);
+  return (
+    <div className="field-block">
+      <FieldLabel text="Тип выгрузки" hint="По категории используется старый cookie-режим. По предмету использует Analytics API token и доступен только для WB и Ozon." />
+      <div className="segmented-control" role="group" aria-label="Тип выгрузки">
+        {sourceTypeOptions.map(([option, label]) => (
+          <button
+            key={option}
+            type="button"
+            className={value === option ? "active" : ""}
+            disabled={option === "subject" && props.disabledSubject}
+            onClick={() => props.onChange(option)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DataSubnav(props: { activeTab: DataTab; onSelect: (tab: DataTab) => void }) {
   const items: Array<{ tab: DataTab; label: string; icon: ReactNode }> = [
     { tab: "cube", label: "Куб", icon: <Database size={16} /> },
@@ -2983,6 +3033,12 @@ function SmartPlanTable(props: { tasks: SmartPlanTask[]; onRetry: (taskId: strin
           render: (task) => <Badge value={liveSmartPlanStatus(task) ?? task.smart_status} />
         },
         { id: "category", label: "Категория", value: (task) => task.category_name, title: (task) => task.category_path },
+        {
+          id: "source_type",
+          label: "Тип",
+          value: (task) => sourceTypeLabel(task.source_type),
+          render: (task) => <span className={`source-claim ${normalizeSourceType(task.source_type)}`}>{sourceTypeLabel(task.source_type)}</span>
+        },
         { id: "marketplace", label: "Marketplace", value: (task) => task.marketplace },
         { id: "month", label: "Месяц", value: (task) => monthLabel(task.year, task.month) },
         {
@@ -3797,6 +3853,11 @@ function CategorySourceEditor(props: {
           <div className="editor-form">
             <SectionTitle icon={<Settings />} title="Строка справочника" hint="После сохранения путь и фильтр обновят список категорий для загрузки." />
             <Toggle label="Активна в приложении" checked={row.active} onChange={(value) => props.onChange(row.id, { active: value })} />
+            <SourceTypeSegmented
+              value={row.source_type}
+              disabledSubject={isYandexMarketplace(row.marketplace)}
+              onChange={(value) => props.onChange(row.id, { source_type: value })}
+            />
             <Toggle label="FBS" hint="Выключать у нефудовых категорий. У Яндекс.Маркета FBS не используется." checked={isYandexMarketplace(row.marketplace) ? false : row.fbs} disabled={isYandexMarketplace(row.marketplace)} onChange={(value) => props.onChange(row.id, { fbs: value })} />
             <div className="form-grid two-cols">
               <label>Категория<input value={row.category_name} onChange={(event) => props.onChange(row.id, { category_name: event.target.value })} /></label>
@@ -3804,7 +3865,7 @@ function CategorySourceEditor(props: {
               <label>От<input value={row.period_from} onChange={(event) => props.onChange(row.id, { period_from: event.target.value })} /></label>
               <label>До<input value={row.period_to} onChange={(event) => props.onChange(row.id, { period_to: event.target.value })} /></label>
             </div>
-            <label>Путь<input value={row.path} onChange={(event) => props.onChange(row.id, { path: event.target.value })} /></label>
+            <label>{normalizeSourceType(row.source_type) === "subject" ? "ID предмета" : "Путь"}<input value={row.path} onChange={(event) => props.onChange(row.id, { path: event.target.value })} /></label>
             <CatalogFilterBuilder sourceKey={row.id} value={row.filter_text} onChange={(value) => props.onChange(row.id, { filter_text: value })} />
             <label>Комментарий<textarea value={row.comment} onChange={(event) => props.onChange(row.id, { comment: event.target.value })} /></label>
             <button className="danger-button" title="Удалить строку из редактора. CSV изменится только после сохранения." onClick={() => props.onDelete(row.id)}>
@@ -3821,6 +3882,12 @@ function CategorySourceEditor(props: {
           onRowClick={(item) => props.onSelect(item.id)}
           columns={[
             { id: "active", label: "Активна", value: (item) => item.active ? "да" : "нет" },
+            {
+              id: "source_type",
+              label: "Тип",
+              value: (item) => sourceTypeLabel(item.source_type),
+              render: (item) => <span className={`source-claim ${normalizeSourceType(item.source_type)}`}>{sourceTypeLabel(item.source_type)}</span>
+            },
             { id: "fbs", label: "FBS", value: (item) => item.fbs ? "да" : "нет" },
             { id: "category", label: "Категория", value: (item) => item.category_name || "-" },
             { id: "marketplace", label: "МП", value: (item) => item.marketplace || "-" },
@@ -4261,6 +4328,12 @@ function CubeTable(props: { items: CubeItem[]; busy: boolean; onDelete: (item: C
         { id: "month", label: "Месяц", value: (item) => monthLabel(item.year, item.month) },
         { id: "marketplace", label: "Marketplace", value: (item) => item.marketplace },
         { id: "category", label: "Категория", value: (item) => item.category_name },
+        {
+          id: "source_type",
+          label: "Тип загрузки",
+          value: (item) => sourceTypeLabel(item.source_type),
+          render: (item) => <span className={`source-claim ${normalizeSourceType(item.source_type)}`}>{sourceTypeLabel(item.source_type)}</span>
+        },
         { id: "rows", label: "Строк", value: (item) => item.rows_count, numeric: true },
         {
           id: "mode",

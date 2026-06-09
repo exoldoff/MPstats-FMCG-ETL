@@ -47,12 +47,20 @@ def standardize_dataframe(df: pd.DataFrame, marketplace_type: str) -> pd.DataFra
     if marketplace_type in {"ozon", "wb"}:
         df = df.rename(
             columns={
+                "id": "SKU",
                 "Brand": "Бренд",
+                "brand": "Бренд",
                 "Name": "Название",
+                "name": "Название",
                 "Sales": "Продажи",
+                "sales": "Продажи",
                 "Seller": "Продавец",
+                "seller": "Продавец",
                 "Average price": "Средняя цена",
+                "average_price": "Средняя цена",
+                "final_price_average": "Средняя цена",
                 "Revenue": "Выручка",
+                "revenue": "Выручка",
             }
         )
     elif marketplace_type == "ym":
