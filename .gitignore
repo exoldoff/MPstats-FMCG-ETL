@@ -51,6 +51,7 @@ pipeline/*.xlsx
 
 # Локальные CSV-справочники web-app
 classifiers/rules.csv
+classifiers/manual_overrides.csv
 Справочник категори*MP STATS.csv
 
 # Excel-дубликаты справочников не являются источником правды
