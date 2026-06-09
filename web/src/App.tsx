@@ -207,6 +207,8 @@ const statusLabels: Record<string, string> = {
 const activeRunStatuses = new Set(["running", "pausing", "stopping"]);
 const passiveCubeActions = new Set(["Предпросмотр БД", "Поиск в БД"]);
 const activeTaskStatuses = new Set(["downloading", "processing", "classifying", "saving_to_db", "running", "pausing", "stopping"]);
+const STARTUP_SPLASH_DURATION_MS = 5000;
+const STARTUP_SPLASH_EXIT_MS = 520;
 
 function isActiveRunStatus(status: string | null | undefined) {
   return Boolean(status && activeRunStatuses.has(status));
@@ -453,6 +455,7 @@ function isDataTab(tab: Tab): tab is DataTab {
 
 export function App() {
   const current = monthNow();
+  const [startupSplashPhase, setStartupSplashPhase] = useState<"visible" | "exiting" | "hidden">("visible");
   const [mode, setMode] = useState<Mode>("historical_backfill");
   const [tab, setTab] = useState<Tab>("plan");
   const [projectName, setProjectName] = useState("mpstats");
@@ -538,6 +541,15 @@ export function App() {
   const [pipelineSettingsOpen, setPipelineSettingsOpen] = useState(false);
   const exportDefaultOutputDirRef = useRef("");
   const previousRunStatusRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const exitId = window.setTimeout(() => setStartupSplashPhase("exiting"), STARTUP_SPLASH_DURATION_MS);
+    const hideId = window.setTimeout(() => setStartupSplashPhase("hidden"), STARTUP_SPLASH_DURATION_MS + STARTUP_SPLASH_EXIT_MS);
+    return () => {
+      window.clearTimeout(exitId);
+      window.clearTimeout(hideId);
+    };
+  }, []);
 
   useEffect(() => {
     void initialLoad();
@@ -1788,9 +1800,12 @@ export function App() {
           ? "Дождись завершения текущего запуска или поставь его на паузу."
           : undefined;
   const runBusyTitle = runIsActive ? "Дождись завершения текущей операции или поставь запуск на паузу." : undefined;
+  const showStartupSplash = startupSplashPhase !== "hidden";
 
   return (
-    <div className="workflow-shell">
+    <>
+      {showStartupSplash ? <StartupSplash exiting={startupSplashPhase === "exiting"} /> : null}
+      <div className={`workflow-shell ${showStartupSplash ? "workflow-shell-under-splash" : ""}`}>
       <header className="app-header">
         <div className="brand">
           <div className="brand-mark">MP</div>
@@ -2487,6 +2502,24 @@ export function App() {
         </aside>
       </main>
       {instructionOpen ? <ProductInstructionModal onClose={() => setInstructionOpen(false)} /> : null}
+      </div>
+    </>
+  );
+}
+
+function StartupSplash({ exiting }: { exiting: boolean }) {
+  return (
+    <div className={`startup-splash ${exiting ? "is-exiting" : ""}`} role="status" aria-label="MPStats Workflow загружается">
+      <div className="startup-logo" aria-hidden="true">
+        <span className="startup-text startup-title">
+          MPStats Workflow
+          <span className="startup-text-fill">MPStats Workflow</span>
+        </span>
+        <span className="startup-text startup-credit">
+          by @exoldoff
+          <span className="startup-text-fill startup-text-fill-credit">by @exoldoff</span>
+        </span>
+      </div>
     </div>
   );
 }

@@ -18,6 +18,181 @@ body {
   background: #f4f6f7;
 }
 
+.startup-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: #eef1f0;
+  opacity: 1;
+  transition:
+    opacity 0.52s ease,
+    transform 0.52s ease;
+}
+
+.startup-splash.is-exiting {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.startup-logo {
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+  user-select: none;
+}
+
+.startup-text {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  color: #9fa8aa;
+  text-align: center;
+  text-shadow:
+    0 1px 1px rgb(255 255 255 / 92%),
+    0 -1px 1px rgb(82 96 100 / 42%),
+    1px 0 1px rgb(255 255 255 / 38%);
+}
+
+.startup-title {
+  font-size: 64px;
+  font-weight: 850;
+  line-height: 1.02;
+}
+
+.startup-credit {
+  font-size: 15px;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.startup-text-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  max-width: 0%;
+  overflow: hidden;
+  color: transparent;
+  background:
+    linear-gradient(90deg, #1f6f68 0%, #2f91a5 30%, #c49a35 52%, #d7536f 74%, #1f6f68 100%);
+  background-size: 230% 100%;
+  background-clip: text;
+  text-shadow: 0 0 20px rgb(47 145 165 / 18%);
+  white-space: nowrap;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation:
+    startup-fill 4.65s steps(22, end) 0.15s both,
+    startup-shimmer 1.08s linear infinite,
+    startup-jitter 0.68s steps(2, end) infinite;
+}
+
+.startup-text-fill-credit {
+  animation:
+    startup-fill 4.08s steps(18, end) 0.68s both,
+    startup-shimmer 1.18s linear infinite,
+    startup-jitter 0.74s steps(2, end) infinite;
+}
+
+.workflow-shell-under-splash {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+@keyframes startup-fill {
+  0% {
+    max-width: 0%;
+  }
+
+  8% {
+    max-width: 7%;
+  }
+
+  15% {
+    max-width: 18%;
+  }
+
+  20% {
+    max-width: 18%;
+  }
+
+  29% {
+    max-width: 33%;
+  }
+
+  36% {
+    max-width: 31%;
+  }
+
+  47% {
+    max-width: 56%;
+  }
+
+  55% {
+    max-width: 56%;
+  }
+
+  68% {
+    max-width: 78%;
+  }
+
+  73% {
+    max-width: 74%;
+  }
+
+  88% {
+    max-width: 94%;
+  }
+
+  100% {
+    max-width: 100%;
+  }
+}
+
+@keyframes startup-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  100% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes startup-jitter {
+  0%,
+  88%,
+  100% {
+    transform: translateX(0);
+  }
+
+  90% {
+    transform: translateX(-1px);
+  }
+
+  92% {
+    transform: translateX(1px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-splash,
+  .startup-text-fill {
+    transition: none;
+    animation: none;
+  }
+
+  .startup-text-fill {
+    max-width: 100%;
+  }
+}
+
 button,
 input,
 textarea,
@@ -3010,6 +3185,14 @@ th {
 }
 
 @media (max-width: 860px) {
+  .startup-title {
+    font-size: 46px;
+  }
+
+  .startup-credit {
+    font-size: 14px;
+  }
+
   .workflow-shell {
     padding: 12px;
   }
@@ -3087,5 +3270,15 @@ th {
 
   .smart-plan-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .startup-title {
+    font-size: 33px;
+  }
+
+  .startup-credit {
+    font-size: 13px;
   }
 }
