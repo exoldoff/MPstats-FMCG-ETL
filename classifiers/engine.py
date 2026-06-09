@@ -33,6 +33,7 @@ ALLOWED_MODES = {"fill_empty", "overwrite"}
 ALLOWED_LOGIC_OPERATORS = {"and", "or"}
 CONDITIONS_COLUMN = "conditions_json"
 NUMBER_PATTERN = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+CATEGORY_FILTER_SEPARATOR = re.compile(r"\s*(?:\||;)\s*")
 
 
 def default_rules_path(base_dir: str | Path | None = None) -> Path:
@@ -378,19 +379,36 @@ def _rule_uses_otherwise(match_type: str, conditions: list[dict[str, str]]) -> b
     return match_type == "otherwise" or any(condition["match_type"] == "otherwise" for condition in conditions)
 
 
-def _build_category_mask(df: pd.DataFrame, *, row_num: int, category_column: str, rule_category: str) -> pd.Series:
+def _split_rule_categories(rule_category: object) -> list[str]:
+    text = str(rule_category).strip()
+    if not text or text == "*":
+        return []
+    parts = CATEGORY_FILTER_SEPARATOR.split(text) if "|" in text or ";" in text else [text]
+    categories = [part.strip() for part in parts if part.strip()]
+    return [] if "*" in categories else categories
+
+
+def _build_category_mask(
+    df: pd.DataFrame,
+    *,
+    row_num: int,
+    category_column: str,
+    rule_categories: list[str],
+) -> pd.Series:
     if category_column not in df.columns:
+        category_filter = " | ".join(rule_categories)
         raise ValueError(
-            f"Rule row {row_num} has category filter '{rule_category}', "
+            f"Rule row {row_num} has category filter '{category_filter}', "
             f"but dataframe has no '{category_column}' column."
         )
+    normalized_categories = {category.casefold() for category in rule_categories}
     return (
         df[category_column]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.casefold()
-        .eq(rule_category.casefold())
+        .isin(normalized_categories)
     )
 
 
@@ -440,13 +458,13 @@ def apply_classifiers(
         if rule.target_column not in out.columns:
             out[rule.target_column] = pd.NA
 
-        rule_category = str(rule.category).strip()
-        if rule_category and rule_category != "*":
+        rule_categories = _split_rule_categories(rule.category)
+        if rule_categories:
             category_mask = _build_category_mask(
                 out,
                 row_num=row_num,
                 category_column=category_column,
-                rule_category=rule_category,
+                rule_categories=rule_categories,
             )
             if category_mask.any():
                 match_mask = _build_rule_mask(

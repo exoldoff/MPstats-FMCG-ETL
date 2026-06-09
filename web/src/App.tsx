@@ -132,6 +132,7 @@ const catalogFilterTypes = [
   ["contains", "Содержит"],
   ["notContains", "Исключает"]
 ] as const;
+const ruleCategorySeparator = " | ";
 
 type ClassifierPreset = "name-to-subcategory" | "sku-to-subcategory" | "name-to-brand" | "otherwise";
 type CatalogFilterType = (typeof catalogFilterTypes)[number][0];
@@ -576,7 +577,7 @@ export function App() {
   }, [pipelineOperation?.runId, pipelineOperation?.finishedAt, run?.id, run?.status, tab]);
 
   useEffect(() => {
-    if (tab === "catalog" && catalogRows.length === 0) {
+    if ((tab === "catalog" || tab === "classifier") && catalogRows.length === 0) {
       void loadCategorySource();
     }
   }, [tab]);
@@ -1242,6 +1243,20 @@ export function App() {
     return catalogRows.filter((row) => `${row.category_name} ${row.marketplace} ${row.path} ${row.filter_text}`.toLowerCase().includes(text));
   }, [catalogRows, catalogQuery]);
   const selectedCatalogRow = useMemo(() => catalogRows.find((row) => row.id === selectedCatalogId) ?? catalogRows[0] ?? null, [catalogRows, selectedCatalogId]);
+  const classifierCategoryOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const row of catalogRows) {
+      const name = row.category_name.trim();
+      if (name) names.add(name);
+    }
+    if (!names.size) {
+      for (const category of categories) {
+        const name = category.category_name.trim();
+        if (name) names.add(name);
+      }
+    }
+    return [...names].sort((left, right) => left.localeCompare(right, "ru"));
+  }, [catalogRows, categories]);
   const filteredClassifierRules = useMemo(() => {
     const text = classifierQuery.trim().toLowerCase();
     if (!text) return classifierRules;
@@ -2307,6 +2322,7 @@ export function App() {
               totalRules={classifierRules.length}
               selectedRule={selectedRule}
               rulesPath={rulesPath}
+              categoryOptions={classifierCategoryOptions}
               manualOverrides={filteredManualOverrides}
               totalManualOverrides={manualOverrides.length}
               selectedManualOverride={selectedManualOverride}
@@ -2469,6 +2485,46 @@ function emptyCondition(join: "and" | "or" = "and"): ClassifierCondition {
   return { join_with_prev: join, match_field: "", match_type: "contains", pattern: "" };
 }
 
+function ruleCategoryValues(value: string): string[] {
+  const text = value.trim();
+  if (!text || text === "*") return [];
+  const parts = text.includes("|") || text.includes(";") ? text.split(/[|;]/) : [text];
+  const seen = new Set<string>();
+  const categories: string[] = [];
+  for (const part of parts) {
+    const category = part.trim();
+    if (!category || category === "*" || seen.has(category)) continue;
+    seen.add(category);
+    categories.push(category);
+  }
+  return categories;
+}
+
+function serializeRuleCategories(values: string[]) {
+  const categories = values.map((value) => value.trim()).filter(Boolean);
+  return categories.length ? categories.join(ruleCategorySeparator) : "*";
+}
+
+function ruleCategoryChoices(options: string[], selected: string[]) {
+  const seen = new Set<string>();
+  const choices: string[] = [];
+  for (const value of [...options, ...selected]) {
+    const category = value.trim();
+    if (!category || seen.has(category)) continue;
+    seen.add(category);
+    choices.push(category);
+  }
+  return choices;
+}
+
+function toggleRuleCategoryValue(currentValue: string, category: string, checked: boolean, options: string[]) {
+  const selected = new Set(ruleCategoryValues(currentValue));
+  if (checked) selected.add(category);
+  else selected.delete(category);
+  const ordered = ruleCategoryChoices(options, [...selected]).filter((value) => selected.has(value));
+  return serializeRuleCategories(ordered);
+}
+
 function nextPriority(rules: ClassifierRule[]) {
   const maxPriority = rules.reduce((max, rule) => Math.max(max, Number(rule.priority) || 0), 0);
   return maxPriority + 10;
@@ -2498,12 +2554,15 @@ function ruleHasOtherwise(rule: ClassifierRule) {
 function ruleConditionSummary(rule: ClassifierRule) {
   const first = rule.conditions[0];
   if (ruleHasOtherwise(rule)) {
-    const category = rule.category && rule.category !== "*" ? ` [${rule.category}]` : "";
-    return `если «${rule.target_column || "целевая колонка"}» пусто${category}`;
+    return `если «${rule.target_column || "целевая колонка"}» пусто`;
   }
   if (!first?.match_field && !first?.pattern) return "условие не задано";
-  const category = rule.category && rule.category !== "*" ? ` [${rule.category}]` : "";
-  return `${first.match_field || "поле"} ${matchTypeLabel(first.match_type)} "${first.pattern || "..."}"${category}`;
+  return `${first.match_field || "поле"} ${matchTypeLabel(first.match_type)} "${first.pattern || "..."}"`;
+}
+
+function ruleCategorySummary(rule: ClassifierRule) {
+  const categories = ruleCategoryValues(rule.category);
+  return categories.length ? categories.join(", ") : "Все";
 }
 
 function ruleActionSummary(rule: ClassifierRule) {
@@ -3829,6 +3888,7 @@ function ClassifierRulesEditor(props: {
   totalRules: number;
   selectedRule: ClassifierRule | null;
   rulesPath: string;
+  categoryOptions: string[];
   manualOverrides: ManualOverride[];
   totalManualOverrides: number;
   selectedManualOverride: ManualOverride | null;
@@ -3861,6 +3921,8 @@ function ClassifierRulesEditor(props: {
 }) {
   const rule = props.selectedRule;
   const manualOverride = props.selectedManualOverride;
+  const selectedRuleCategories = rule ? ruleCategoryValues(rule.category) : [];
+  const categoryChoices = rule ? ruleCategoryChoices(props.categoryOptions, selectedRuleCategories) : props.categoryOptions;
   return (
     <section className="panel stage-panel">
       <SectionTitle
@@ -3996,7 +4058,44 @@ function ClassifierRulesEditor(props: {
             <div className="rule-block">
               <h3>1. Когда применять</h3>
               <div className="form-grid two-cols">
-                <label>Для категории<input value={rule.category} onChange={(event) => props.onChange(rule.id, { category: event.target.value })} placeholder="* или название категории" /></label>
+                <div className="category-picker">
+                  <FieldLabel text="Для категории" hint="Список берётся из CSV-справочника категорий. Если выбрано «Все», правило применяется без ограничения по категории." />
+                  <div className="category-picker-head">
+                    <label className="category-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={selectedRuleCategories.length === 0}
+                        onChange={(event) =>
+                          props.onChange(rule.id, {
+                            category: event.target.checked ? "*" : serializeRuleCategories(categoryChoices.slice(0, 1))
+                          })
+                        }
+                      />
+                      <span>Все</span>
+                    </label>
+                    <small>{selectedRuleCategories.length ? `${selectedRuleCategories.length} выбрано` : "без ограничения"}</small>
+                  </div>
+                  <div className="category-checkbox-list">
+                    {categoryChoices.length ? (
+                      categoryChoices.map((category) => (
+                        <label className="category-checkbox" key={category}>
+                          <input
+                            type="checkbox"
+                            checked={selectedRuleCategories.includes(category)}
+                            onChange={(event) =>
+                              props.onChange(rule.id, {
+                                category: toggleRuleCategoryValue(rule.category, category, event.target.checked, props.categoryOptions)
+                              })
+                            }
+                          />
+                          <span title={category}>{category}</span>
+                        </label>
+                      ))
+                    ) : (
+                      <span className="muted-cell">Категории не найдены</span>
+                    )}
+                  </div>
+                </div>
                 <label>Порядок<input type="number" value={rule.priority} onChange={(event) => props.onChange(rule.id, { priority: Number(event.target.value) })} /></label>
               </div>
             </div>
@@ -4073,6 +4172,7 @@ function ClassifierRulesEditor(props: {
           columns={[
             { id: "active", label: "Вкл", value: (item) => item.active ? "да" : "нет" },
             { id: "priority", label: "Порядок", value: (item) => item.priority, numeric: true },
+            { id: "category", label: "Категория", value: ruleCategorySummary, title: ruleCategorySummary },
             { id: "condition", label: "Если", value: ruleConditionSummary, title: ruleConditionSummary },
             { id: "action", label: "Записать", value: ruleActionSummary, title: ruleActionSummary },
             { id: "mode", label: "Режим", value: (item) => ruleModeLabel(item.mode) }

@@ -1139,6 +1139,15 @@ select {
   position: relative;
 }
 
+.filterable-table table {
+  min-width: 100%;
+}
+
+.filterable-table th,
+.filterable-table td {
+  max-width: none;
+}
+
 .filterable-th {
   position: relative;
   min-width: 0;
@@ -1164,6 +1173,44 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.column-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  min-height: 100%;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.column-resize-handle::after {
+  position: absolute;
+  top: 7px;
+  right: 4px;
+  bottom: 7px;
+  width: 1px;
+  background: #b8c8cc;
+  content: "";
+  opacity: 0;
+}
+
+.column-resize-handle:hover::after,
+.column-resize-handle:focus-visible::after,
+.column-resize-active .column-resize-handle::after {
+  opacity: 1;
+}
+
+.column-resize-active {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .filterable-th-button.active,
@@ -1353,6 +1400,66 @@ th:nth-last-child(-n + 2) .column-filter-menu {
   border: 1px solid #d8e1e4;
   border-radius: 8px;
   background: #fbfcfc;
+}
+
+.category-picker {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.category-picker .field-label {
+  font-size: 13px;
+}
+
+.category-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.category-checkbox-list {
+  display: grid;
+  gap: 4px;
+  max-height: 178px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.category-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 28px;
+  border-radius: 6px;
+  padding: 3px 5px;
+  color: #274348;
+  font-size: 12px;
+}
+
+.category-checkbox:hover {
+  background: #eef5f4;
+}
+
+.category-checkbox input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 15px;
+  min-height: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: #1f6f68;
+}
+
+.category-checkbox span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .classifier-empty-state {

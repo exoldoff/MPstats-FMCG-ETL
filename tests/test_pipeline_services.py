@@ -494,6 +494,34 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result.iloc[0]["Категория"], "Мыло")
             self.assertEqual(result.iloc[0]["Подкатегория"], "Жидкое")
 
+    def test_category_prefilter_accepts_multiple_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;Мыло | Сахар;Подкатегория;Название;contains;бел;Белое;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame(
+                [
+                    {"Категория": "Мыло", "Название": "белое мыло"},
+                    {"Категория": "Сахар", "Название": "белый сахар"},
+                    {"Категория": "Мясо", "Название": "белое мясо"},
+                ]
+            )
+
+            result, report = apply_classifiers(frame, rules_file)
+
+            self.assertEqual(int(report.iloc[0]["candidate_rows"]), 2)
+            self.assertEqual(int(report.iloc[0]["applied_rows"]), 2)
+            self.assertEqual(result["Подкатегория"].fillna("").tolist(), ["Белое", "Белое", ""])
+
     def test_category_prefilter_skips_match_when_no_candidate_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

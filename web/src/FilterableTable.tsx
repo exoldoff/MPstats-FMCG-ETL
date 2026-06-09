@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Filter, RotateCcw, Search, X } from "lucide-react";
-import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
 
 export type SortDirection = "asc" | "desc";
 
@@ -42,11 +42,22 @@ type FilterableTableProps<T> = {
 };
 
 const LIST_LIMIT = 120;
+const MIN_COLUMN_WIDTH = 90;
+const MAX_COLUMN_WIDTH = 720;
+
+type ResizeState = {
+  columnId: string;
+  pointerId?: number;
+  startX: number;
+  startWidth: number;
+};
 
 export function FilterableTable<T>(props: FilterableTableProps<T>) {
   const [openColumnId, setOpenColumnId] = useState<string | null>(null);
   const [filters, setFilters] = useState<Record<string, ColumnFilterState>>({});
   const [sort, setSort] = useState<SortState>(null);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const resizeState = useRef<ResizeState | null>(null);
 
   const valueOptions = useMemo(() => {
     const out: Record<string, string[]> = {};
@@ -130,6 +141,69 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
     props.onSortChange?.(columnId, direction);
   }
 
+  function startColumnResize(event: ReactPointerEvent<HTMLButtonElement>, columnId: string) {
+    resizeState.current = {
+      columnId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: resizeStartWidth(event.currentTarget, columnId)
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("column-resize-active");
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function moveColumnResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const state = resizeState.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    updateColumnResize(event.clientX);
+  }
+
+  function stopColumnResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const state = resizeState.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resizeState.current = null;
+    document.body.classList.remove("column-resize-active");
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function startColumnMouseResize(event: ReactMouseEvent<HTMLButtonElement>, columnId: string) {
+    if (event.button !== 0 || resizeState.current) return;
+    resizeState.current = {
+      columnId,
+      startX: event.clientX,
+      startWidth: resizeStartWidth(event.currentTarget, columnId)
+    };
+    document.body.classList.add("column-resize-active");
+    const handleMouseMove = (moveEvent: MouseEvent) => updateColumnResize(moveEvent.clientX);
+    const handleMouseUp = () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      resizeState.current = null;
+      document.body.classList.remove("column-resize-active");
+    };
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp, { once: true });
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function resizeStartWidth(handle: HTMLButtonElement, columnId: string) {
+    const headerCell = handle.closest("th");
+    return headerCell?.getBoundingClientRect().width ?? columnWidths[columnId] ?? MIN_COLUMN_WIDTH;
+  }
+
+  function updateColumnResize(clientX: number) {
+    const state = resizeState.current;
+    if (!state) return;
+    const width = Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, Math.round(state.startWidth + clientX - state.startX)));
+    setColumnWidths((current) => (current[state.columnId] === width ? current : { ...current, [state.columnId]: width }));
+  }
+
   function toggleValue(columnId: string, value: string) {
     const current = columnFilter(columnId);
     const allValues = valueOptions[columnId] ?? [];
@@ -150,14 +224,21 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
       </div>
       <div className="table-wrap">
         <table>
+          <colgroup>
+            {props.columns.map((column) => (
+              <col key={column.id} style={columnWidths[column.id] ? { width: `${columnWidths[column.id]}px` } : undefined} />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               {props.columns.map((column) => {
                 const filterState = columnFilter(column.id);
                 const isOpen = openColumnId === column.id;
                 const isActive = isFilterActive(filterState) || sort?.columnId === column.id;
+                const columnWidth = columnWidths[column.id];
+                const columnStyle = columnWidth ? { width: `${columnWidth}px`, minWidth: `${columnWidth}px` } : undefined;
                 return (
-                  <th key={column.id} className={column.className}>
+                  <th key={column.id} className={column.className} style={columnStyle}>
                     <div className="filterable-th">
                       <button
                         type="button"
@@ -170,6 +251,17 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
                         {sort?.columnId === column.id ? (sort.direction === "asc" ? <ArrowUp size={13} /> : <ArrowDown size={13} />) : null}
                         {column.filterable !== false ? <Filter size={13} /> : null}
                       </button>
+                      <button
+                        type="button"
+                        className="column-resize-handle"
+                        title={`Изменить ширину: ${column.label}`}
+                        aria-label={`Изменить ширину: ${column.label}`}
+                        onPointerDown={(event) => startColumnResize(event, column.id)}
+                        onPointerMove={moveColumnResize}
+                        onPointerUp={stopColumnResize}
+                        onPointerCancel={stopColumnResize}
+                        onMouseDown={(event) => startColumnMouseResize(event, column.id)}
+                      />
                       {isOpen ? (
                         <ColumnFilterMenu
                           column={column}
@@ -199,11 +291,15 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
                 className={props.getRowClassName?.(row)}
                 onClick={props.onRowClick ? () => props.onRowClick?.(row) : undefined}
               >
-                {props.columns.map((column) => (
-                  <td key={column.id} className={column.className} title={column.title ? column.title(row) : cellText(column.value(row))}>
-                    {column.render ? column.render(row) : cellText(column.value(row))}
-                  </td>
-                ))}
+                {props.columns.map((column) => {
+                  const columnWidth = columnWidths[column.id];
+                  const columnStyle = columnWidth ? { width: `${columnWidth}px`, minWidth: `${columnWidth}px` } : undefined;
+                  return (
+                    <td key={column.id} className={column.className} style={columnStyle} title={column.title ? column.title(row) : cellText(column.value(row))}>
+                      {column.render ? column.render(row) : cellText(column.value(row))}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
