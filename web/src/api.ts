@@ -128,7 +128,7 @@ export type PipelineRun = {
   progress?: number;
   is_active?: boolean;
   operation_progress?: {
-    kind: "reclassify" | "rebuild" | string;
+    kind: "reclassify" | "rebuild" | "reprocess" | string;
     total_files: number;
     completed_files: number;
     failed_files: number;
@@ -660,6 +660,8 @@ export const api = {
     request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/rebuild-cube`, { method: "POST", body: JSON.stringify({ wait }) }),
   reclassifyCube: (runId: string, wait = false) =>
     request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/reclassify-cube`, { method: "POST", body: JSON.stringify({ wait }) }),
+  reprocessSources: (runId: string, wait = false) =>
+    request<PipelineRun>(`/api/workflow/pipeline/runs/${runId}/reprocess-sources`, { method: "POST", body: JSON.stringify({ wait }) }),
   getExportOptions: (projectName: string) => request<ExportOptions>(`/api/exports/options?project_name=${encodeURIComponent(projectName)}`),
   listExportTemplates: (projectName: string) =>
     request<{ templates: ExportTemplate[] }>(`/api/exports/templates?project_name=${encodeURIComponent(projectName)}`),

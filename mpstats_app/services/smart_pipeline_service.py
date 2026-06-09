@@ -325,10 +325,15 @@ class SmartPipelineService:
         task_ids: list[str] | None = None,
         rebuild_only: bool = False,
         force_reclassify: bool = False,
+        force_reprocess: bool = False,
         force_db_overwrite: bool = False,
         wait: bool = False,
     ) -> dict[str, Any]:
-        operation_kind = self._operation_kind(rebuild_only=rebuild_only, force_reclassify=force_reclassify)
+        operation_kind = self._operation_kind(
+            rebuild_only=rebuild_only,
+            force_reclassify=force_reclassify,
+            force_reprocess=force_reprocess,
+        )
         with self._lock:
             if self._is_thread_active(run_id):
                 return self.get_run(run_id)
@@ -354,6 +359,7 @@ class SmartPipelineService:
                         "task_ids": task_ids,
                         "rebuild_only": rebuild_only,
                         "force_reclassify": force_reclassify,
+                        "force_reprocess": force_reprocess,
                         "force_db_overwrite": force_db_overwrite,
                     },
                     daemon=True,
@@ -368,6 +374,7 @@ class SmartPipelineService:
                 task_ids=task_ids,
                 rebuild_only=rebuild_only,
                 force_reclassify=force_reclassify,
+                force_reprocess=force_reprocess,
                 force_db_overwrite=force_db_overwrite,
             )
             return self.get_run(run_id)
@@ -426,6 +433,14 @@ class SmartPipelineService:
             wait=wait,
         )
 
+    def reprocess_sources(self, *, run_id: str, wait: bool = False) -> dict[str, Any]:
+        return self.start_run(
+            run_id=run_id,
+            force_reprocess=True,
+            force_db_overwrite=True,
+            wait=wait,
+        )
+
     def _operation_tasks(self, *, run_id: str, task_filter: str = "all", task_ids: list[str] | None = None) -> list[dict[str, Any]]:
         tasks = self.repository.list_download_tasks(run_id=run_id, task_filter=task_filter)
         if not task_ids:
@@ -434,7 +449,9 @@ class SmartPipelineService:
         return [task for task in tasks if str(task["id"]) in wanted]
 
     @staticmethod
-    def _operation_kind(*, rebuild_only: bool, force_reclassify: bool) -> str | None:
+    def _operation_kind(*, rebuild_only: bool, force_reclassify: bool, force_reprocess: bool) -> str | None:
+        if force_reprocess:
+            return "reprocess"
         if force_reclassify:
             return "reclassify"
         if rebuild_only:
@@ -492,14 +509,19 @@ class SmartPipelineService:
         task_ids: list[str] | None = None,
         rebuild_only: bool = False,
         force_reclassify: bool = False,
+        force_reprocess: bool = False,
         force_db_overwrite: bool = False,
     ) -> None:
         run = self.repository.get_pipeline_run(run_id)
         if not run:
             return
-        operation_kind = self._operation_kind(rebuild_only=rebuild_only, force_reclassify=force_reclassify)
+        operation_kind = self._operation_kind(
+            rebuild_only=rebuild_only,
+            force_reclassify=force_reclassify,
+            force_reprocess=force_reprocess,
+        )
         settings = {**self.get_pipeline_settings(), **self._json_dict(run.get("settings_json"))}
-        if force_reclassify:
+        if force_reclassify or force_reprocess:
             settings["overwrite_processed"] = True
         if force_db_overwrite:
             settings["overwrite_db"] = True
@@ -521,6 +543,7 @@ class SmartPipelineService:
                     settings=settings,
                     rebuild_only=rebuild_only,
                     force_reclassify=force_reclassify,
+                    force_reprocess=force_reprocess,
                 )
                 self._mark_operation_file(run_id, success=success)
                 self._check_control(run_id)
@@ -566,10 +589,19 @@ class SmartPipelineService:
         settings: dict[str, Any],
         rebuild_only: bool = False,
         force_reclassify: bool = False,
+        force_reprocess: bool = False,
     ) -> bool:
         task_id = str(task["id"])
         try:
             self._check_control(str(task["run_id"]))
+            if force_reprocess:
+                self._prepare_reprocess_task(task_id)
+                self._process_task(task_id, settings=settings)
+                self._check_control(str(task["run_id"]))
+                self._classify_task(task_id, settings=settings, force_reclassify=True)
+                self._check_control(str(task["run_id"]))
+                self._save_task(task_id, settings=settings)
+                return True
             fresh = self.repository.get_download_task(task_id) or task
             classified_exists = Path(str(fresh["classified_file_path"])).exists()
             processed_exists = Path(str(fresh["processed_file_path"])).exists()
@@ -595,6 +627,29 @@ class SmartPipelineService:
                 {"status": "failed", "error_message": str(exc)},
             )
             return False
+
+    def _prepare_reprocess_task(self, task_id: str) -> None:
+        task = self.repository.get_download_task(task_id)
+        if not task:
+            raise KeyError(task_id)
+        raw_path = Path(str(task["raw_file_path"]))
+        if not raw_path.exists():
+            raise FileNotFoundError(f"Raw-файл для переобработки не найден: {raw_path}")
+        for key in ("processed_file_path", "classified_file_path"):
+            path = Path(str(task[key]))
+            if path.exists():
+                path.unlink()
+        self.repository.update_download_task(
+            task_id,
+            {
+                "status": "downloaded",
+                "download_status": "downloaded",
+                "process_status": "pending",
+                "classify_status": "pending",
+                "save_status": "pending",
+                "error_message": None,
+            },
+        )
 
     def _download_task(self, task: dict[str, Any], *, settings: dict[str, Any]) -> None:
         task_id = str(task["id"])

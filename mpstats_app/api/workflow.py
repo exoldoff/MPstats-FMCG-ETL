@@ -309,6 +309,15 @@ def reclassify_pipeline_cube(
     return _handle(lambda: pipeline.reclassify_cube(run_id=run_id, wait=payload.wait))
 
 
+@router.post("/pipeline/runs/{run_id}/reprocess-sources")
+def reprocess_pipeline_sources(
+    run_id: str,
+    payload: PipelineActionPayload,
+    pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
+) -> dict[str, object]:
+    return _handle(lambda: pipeline.reprocess_sources(run_id=run_id, wait=payload.wait))
+
+
 @router.post("/pipeline/tasks/{task_id}/retry")
 def retry_pipeline_task(
     task_id: str,

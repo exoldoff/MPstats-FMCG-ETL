@@ -1829,6 +1829,59 @@ class WebApiTest(unittest.TestCase):
                 old_search = client.get("/api/products", params={"query": "тест", "limit": 100})
                 self.assertEqual(old_search.json()["total"], 0)
 
+                for index, task in enumerate(tasks):
+                    write_semicolon_csv(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "SKU": f"raw-{index}",
+                                    "Brand": "brand",
+                                    "Name": f"лимон сырой {index} 3 x 175 г",
+                                    "Sales": 5,
+                                    "Average price": 100,
+                                    "Revenue": 500,
+                                    "Seller": "seller",
+                                }
+                            ]
+                        ),
+                        Path(task["raw_file_path"]),
+                    )
+                    write_semicolon_csv(pd.DataFrame([{"SKU": "старый processed"}]), Path(task["processed_file_path"]))
+                    write_semicolon_csv(pd.DataFrame([{"SKU": "старый classified"}]), Path(task["classified_file_path"]))
+
+                reprocessed = client.post(f"/api/workflow/pipeline/runs/{run_id}/reprocess-sources", json={"wait": True})
+                self.assertEqual(reprocessed.status_code, 200)
+                reprocessed_payload = reprocessed.json()
+                self.assertEqual(reprocessed_payload["completed_tasks"], 4)
+                self.assertEqual(reprocessed_payload["failed_tasks"], 0)
+                self.assertEqual(
+                    reprocessed_payload["operation_progress"],
+                    {
+                        "kind": "reprocess",
+                        "total_files": 4,
+                        "completed_files": 4,
+                        "failed_files": 0,
+                        "remaining_files": 0,
+                        "progress": 100.0,
+                        "status": "succeeded",
+                    },
+                )
+                reprocessed_task = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"][0]
+                processed_text = Path(reprocessed_task["processed_file_path"]).read_text(encoding="utf-8-sig")
+                classified_text = Path(reprocessed_task["classified_file_path"]).read_text(encoding="utf-8-sig")
+                self.assertIn("лимон сырой", processed_text)
+                self.assertIn("Вес, кг", processed_text)
+                self.assertIn("Вес, кг (ед.)", processed_text)
+                self.assertNotIn("старый processed", processed_text)
+                self.assertIn("лимон сырой", classified_text)
+                self.assertNotIn("старый classified", classified_text)
+                raw_search = client.get("/api/products", params={"query": "сырой", "limit": 100})
+                self.assertEqual(raw_search.status_code, 200)
+                raw_payload = raw_search.json()
+                self.assertEqual(raw_payload["total"], 4)
+                self.assertEqual({row["Тип"] for row in raw_payload["rows"]}, {"Кислота"})
+                self.assertEqual(client.get("/api/products", params={"query": "исправленный", "limit": 100}).json()["total"], 0)
+
                 repository: DuckDbAppRepository = app.state.repository
                 repository.update_download_task(tasks[0]["id"], {"status": "failed", "error_message": "unit failure"})
                 retry_errors = client.post(f"/api/workflow/pipeline/runs/{run_id}/retry-errors", json={"wait": True})

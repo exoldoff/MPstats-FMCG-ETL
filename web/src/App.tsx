@@ -2430,6 +2430,18 @@ export function App() {
                   {activeOperationKind === "reclassify" ? <LoaderCircle className="spin" size={20} /> : <RotateCcw size={20} />}
                   <span><strong>{activeOperationKind === "reclassify" ? "Переклассификация идёт" : "Переклассифицировать куб"}</strong><small>Перезаписать classified и БД</small></span>
                 </button>
+                <button
+                  className={`action-button ${activeOperationKind === "reprocess" ? "is-working" : ""}`}
+                  disabled={!canRebuildCube}
+                  title={runBusyTitle}
+                  onClick={async () => {
+                    if (!run?.id || !(await saveClassifierWorkspace())) return;
+                    void runPipelineAction("reprocess", "Переобработка исходников", "Raw-файлы заново проходят обработку, парсинг веса, классификацию и замену срезов БД.", () => api.reprocessSources(run.id), (fresh) => { void refreshRun(fresh.id); });
+                  }}
+                >
+                  {activeOperationKind === "reprocess" ? <LoaderCircle className="spin" size={20} /> : <FolderSync size={20} />}
+                  <span><strong>{activeOperationKind === "reprocess" ? "Переобработка идёт" : "Переобработать исходники"}</strong><small>{"raw -> processed -> classified -> БД"}</small></span>
+                </button>
               </div>
               <div className="action-group">
                 <span className="action-group-label">Ежемесячно</span>
@@ -4333,7 +4345,11 @@ function PipelineOperationModal(props: {
   const active = isActiveRunStatus(status) || (!props.operation.finishedAt && status === "running");
   const steps = pipelineOperationSteps(props.operation.kind);
   const currentStepIndex = pipelineOperationStepIndex(props.operation.kind, run?.current_step ?? "", status);
-  const completedMetric = props.operation.kind === "reclassify" ? "Переклассифицировано" : "Готово";
+  const completedMetric = props.operation.kind === "reclassify"
+    ? "Переклассифицировано"
+    : props.operation.kind === "reprocess"
+      ? "Переобработано"
+      : "Готово";
 
   return (
     <div className="modal-backdrop operation-backdrop" role="presentation">
@@ -4378,6 +4394,12 @@ function PipelineOperationModal(props: {
               <span>Во время переклассификации classified-файлы и срезы БД заменяются по задачам плана. Предпросмотр куба обновится после статуса «готово».</span>
             </div>
           ) : null}
+          {props.operation.kind === "reprocess" ? (
+            <div className="operation-note">
+              <AlertTriangle size={16} />
+              <span>Во время переобработки старые processed/classified-файлы заменяются новыми из raw, а срезы БД перезаписываются по задачам плана.</span>
+            </div>
+          ) : null}
         </div>
         <div className="operation-actions">
           <button className="ghost-button" onClick={props.onOpenPlan}>Умный план</button>
@@ -4390,6 +4412,9 @@ function PipelineOperationModal(props: {
 }
 
 function pipelineOperationSteps(kind: PipelineOperationKind) {
+  if (kind === "reprocess") {
+    return ["Проверка raw-файлов", "Обработка и парсинг веса", "Применение классификатора", "Замена срезов БД"];
+  }
   if (kind === "reclassify") {
     return ["Проверка processed-файлов", "Применение правил классификатора", "Замена срезов БД", "Обновление куба в интерфейсе"];
   }
