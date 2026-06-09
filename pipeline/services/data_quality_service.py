@@ -41,8 +41,9 @@ IDENTIFIER_COLUMNS = (
     "nmId",
     "nm_id",
 )
-TOTAL_WEIGHT_COLUMNS = ("Вес, кг (сумм.)",)
-WEIGHT_COLUMNS = ("Вес, кг", *TOTAL_WEIGHT_COLUMNS, "Вес кг", "weight_kg", "parsed_weight_kg")
+UNIT_WEIGHT_COLUMNS = ("Вес, кг (ед.)",)
+TOTAL_WEIGHT_COLUMNS = ("Вес, кг", "Вес, кг (сумм.)")
+WEIGHT_COLUMNS = (*TOTAL_WEIGHT_COLUMNS, *UNIT_WEIGHT_COLUMNS, "Вес кг", "weight_kg", "parsed_weight_kg")
 RAW_WEIGHT_COLUMNS = ("Вес, кг сырой", "raw_weight_kg")
 VOLUME_COLUMNS = ("Объем, кг", "Объём, кг", "Объем, т", "Объём, т", "Объем, л", "Объём, л", "volume_kg", "volume_l")
 
@@ -226,7 +227,7 @@ class DataQualityService:
             numeric = _numeric_series(df[column])
             present = numeric.notna()
             zero_or_negative |= (present & numeric.lt(0)).fillna(False)
-            if _normalized(column) in {_normalized(item) for item in VOLUME_COLUMNS + TOTAL_WEIGHT_COLUMNS}:
+            if _is_total_weight_or_volume_column(column, df.columns):
                 too_large |= numeric.gt(MAX_REASONABLE_VOLUME_KG).fillna(False)
             else:
                 too_large |= numeric.gt(MAX_REASONABLE_WEIGHT_KG).fillna(False)
@@ -467,6 +468,17 @@ def _empty_mask(series: pd.Series) -> pd.Series:
 def _numeric_series(series: pd.Series) -> pd.Series:
     text = series.astype("string").str.replace("\u00a0", "", regex=False).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
     return pd.to_numeric(text, errors="coerce")
+
+
+def _is_total_weight_or_volume_column(column: str, all_columns: pd.Index) -> bool:
+    normalized_column = _normalized(column)
+    if normalized_column in {_normalized(item) for item in VOLUME_COLUMNS}:
+        return True
+    if normalized_column == _normalized("Вес, кг (сумм.)"):
+        return True
+    if normalized_column == _normalized("Вес, кг"):
+        return any(_normalized(item) == _normalized("Вес, кг (ед.)") for item in all_columns)
+    return False
 
 
 def _share(count: int, total: int) -> float:

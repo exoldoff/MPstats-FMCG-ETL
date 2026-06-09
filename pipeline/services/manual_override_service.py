@@ -36,7 +36,7 @@ def _validate_and_prepare_overrides(frame: pd.DataFrame) -> pd.DataFrame:
         out[column] = out[column].astype(str).str.strip()
 
     out["row_num"] = range(2, len(out) + 2)
-    out["active"] = out["active"].map(_to_bool)
+    out["active"] = out["active"].map(_to_bool).astype(bool)
     out["priority"] = pd.to_numeric(out["priority"], errors="coerce").fillna(9999).astype(int)
     out["mode"] = out["mode"].str.lower().replace("", "overwrite")
 

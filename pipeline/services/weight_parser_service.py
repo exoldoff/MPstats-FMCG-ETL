@@ -40,7 +40,8 @@ SINGLE = re.compile(rf"(?P<qty>{NUM})\s*(?P<unit>{UNIT})(?=\W|$)", re.IGNORECASE
 RX_L_BIG = re.compile(rf"\b(\d{{3,4}})\s*({L_UNITS})\b", re.IGNORECASE)
 RX_ML_LONG = re.compile(rf"\b(\d{{6,12}})\s*({ML_UNITS})\b", re.IGNORECASE)
 
-TOTAL_WEIGHT_COLUMN = "Вес, кг (сумм.)"
+UNIT_WEIGHT_COLUMN = "Вес, кг (ед.)"
+TOTAL_WEIGHT_COLUMN = "Вес, кг"
 
 STEP4_IN_CANON = [
     "Дата",
@@ -56,7 +57,7 @@ STEP4_IN_CANON = [
 ]
 STEP4_OUT_ORDER = STEP4_IN_CANON + [
     "Вес, кг сырой",
-    "Вес, кг",
+    UNIT_WEIGHT_COLUMN,
     TOTAL_WEIGHT_COLUMN,
     "Вес аномалия",
     "Вес причина",
@@ -237,7 +238,7 @@ def apply_step4_output_schema(df: pd.DataFrame) -> pd.DataFrame:
     out["Выручка, руб"] = money_to_float(out["Выручка, руб"]).astype("float64")
     out["Средняя цена, руб"] = pd.to_numeric(out["Средняя цена, руб"], errors="coerce").astype("float64")
     out["Вес, кг сырой"] = pd.to_numeric(out["Вес, кг сырой"], errors="coerce").astype("float64")
-    out["Вес, кг"] = pd.to_numeric(out["Вес, кг"], errors="coerce").astype("float64")
+    out[UNIT_WEIGHT_COLUMN] = pd.to_numeric(out[UNIT_WEIGHT_COLUMN], errors="coerce").astype("float64")
     out[TOTAL_WEIGHT_COLUMN] = pd.to_numeric(out[TOTAL_WEIGHT_COLUMN], errors="coerce").astype("float64")
     out["Вес аномалия"] = out["Вес аномалия"].fillna(False).astype(bool)
     out["Объем, кг"] = pd.to_numeric(out["Объем, кг"], errors="coerce").fillna(0.0).astype("float64")
@@ -263,11 +264,11 @@ def parse_weights_dataframe(df: pd.DataFrame, *, max_weight_kg: float = 40.0) ->
     total_weight_raw = extracted_weights.apply(lambda value: value.total_kg if value else np.nan)
 
     fixes = out.apply(lambda row: sanitize_weight_kg(row["Название"], row["Вес, кг сырой"], max_weight_kg), axis=1)
-    out["Вес, кг"] = fixes.apply(lambda value: value[0])
+    out[UNIT_WEIGHT_COLUMN] = fixes.apply(lambda value: value[0])
     weight_multiplier = total_weight_raw / out["Вес, кг сырой"]
     out[TOTAL_WEIGHT_COLUMN] = np.where(
-        out["Вес, кг"].notna() & np.isfinite(weight_multiplier),
-        out["Вес, кг"] * weight_multiplier,
+        out[UNIT_WEIGHT_COLUMN].notna() & np.isfinite(weight_multiplier),
+        out[UNIT_WEIGHT_COLUMN] * weight_multiplier,
         np.nan,
     )
     out["Вес аномалия"] = fixes.apply(lambda value: value[1])

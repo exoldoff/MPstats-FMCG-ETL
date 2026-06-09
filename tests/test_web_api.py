@@ -102,6 +102,79 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(past["days_in_month"], 30)
         self.assertEqual(past["data_actual_until"], "2026-04-30")
 
+    def test_weight_column_migration_renames_unit_and_total_weight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            with connect(settings.db_path) as con:
+                con.execute(
+                    f"""
+                    CREATE TABLE {settings.products_table} (
+                        SKU VARCHAR,
+                        {quote_duckdb_name("Вес, кг")} DOUBLE,
+                        {quote_duckdb_name("Вес, кг (сумм.)")} DOUBLE
+                    )
+                    """
+                )
+                con.execute(f"INSERT INTO {settings.products_table} VALUES ('sku-pack', 0.5, 1.5)")
+
+            DuckDbAppRepository(settings).ensure_ready()
+
+            with connect(settings.db_path) as con:
+                columns = [row[1] for row in con.execute(f"PRAGMA table_info({settings.products_table})").fetchall()]
+                row = con.execute(
+                    f"""
+                    SELECT
+                        TRY_CAST(REPLACE(CAST({quote_duckdb_name("Вес, кг")} AS VARCHAR), ',', '.') AS DOUBLE),
+                        TRY_CAST(REPLACE(CAST({quote_duckdb_name("Вес, кг (ед.)")} AS VARCHAR), ',', '.') AS DOUBLE)
+                    FROM {settings.products_table}
+                    """
+                ).fetchone()
+
+            self.assertIn("Вес, кг", columns)
+            self.assertIn("Вес, кг (ед.)", columns)
+            self.assertNotIn("Вес, кг (сумм.)", columns)
+            self.assertEqual(row, (1.5, 0.5))
+
+    def test_db_import_maps_legacy_weight_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            repository.ensure_ready()
+
+            legacy_file = root / "legacy-weight.csv"
+            write_semicolon_csv(
+                pd.DataFrame([{"SKU": "sku-pack", "Вес, кг": "0,5", "Вес, кг (сумм.)": "1,5", "Продажи, шт": 1}]),
+                legacy_file,
+            )
+            repository.import_products_file_idempotent(
+                run_id="run-legacy-weight",
+                csv_path=legacy_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=2,
+                marketplace_code="oz",
+                category_key="sugar",
+            )
+
+            with connect(settings.db_path) as con:
+                columns = [row[1] for row in con.execute(f"PRAGMA table_info({settings.products_table})").fetchall()]
+                row = con.execute(
+                    f"""
+                    SELECT
+                        TRY_CAST(REPLACE(CAST({quote_duckdb_name("Вес, кг")} AS VARCHAR), ',', '.') AS DOUBLE),
+                        TRY_CAST(REPLACE(CAST({quote_duckdb_name("Вес, кг (ед.)")} AS VARCHAR), ',', '.') AS DOUBLE)
+                    FROM {settings.products_table}
+                    """
+                ).fetchone()
+
+            self.assertNotIn("Вес, кг (сумм.)", columns)
+            self.assertEqual(row, (1.5, 0.5))
+
     def test_db_import_widens_empty_classifier_column_to_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -678,8 +751,8 @@ class WebApiTest(unittest.TestCase):
             write_semicolon_csv(
                 pd.DataFrame(
                     [
-                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-1", "Название": "лимон 1 кг", "Бренд": "Brand A", "Продажи, шт": 3, "Вес, кг": "1,0", "Вес, кг (сумм.)": "1,0"},
-                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-2", "Название": "лимон 2 кг", "Бренд": "Brand B", "Продажи, шт": 5, "Вес, кг": "0,5", "Вес, кг (сумм.)": "1,5"},
+                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-1", "Название": "лимон 1 кг", "Бренд": "Brand A", "Продажи, шт": 3, "Вес, кг": "1,0", "Вес, кг (ед.)": "1,0"},
+                        {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-2", "Название": "лимон 2 кг", "Бренд": "Brand B", "Продажи, шт": 5, "Вес, кг": "1,5", "Вес, кг (ед.)": "0,5"},
                         {"Маркетплейс": "Ozon", "Категория": "Лимонная кислота", "SKU": "sku-0", "Название": "лимон без продаж", "Бренд": "Brand Z", "Продажи, шт": 0},
                     ]
                 ),
@@ -735,7 +808,7 @@ class WebApiTest(unittest.TestCase):
                     "category_keys": ["lemon-oz"],
                     "period_from": "2025-01",
                     "period_to": "2025-01",
-                    "selected_columns": ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"],
+                    "selected_columns": ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (ед.)"],
                     "filters": [
                         {"column": "Название", "match_type": "contains", "value": "лимон"},
                         {"column": "Продажи, шт", "match_type": "gt", "value": "0"},
@@ -751,7 +824,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(preview.status_code, 200)
                 preview_data = preview.json()
                 self.assertEqual(preview_data["total"], 2)
-                self.assertEqual(preview_data["columns"], ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"])
+                self.assertEqual(preview_data["columns"], ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (ед.)"])
                 self.assertEqual(preview_data["breakdown"][0]["period"], "2025-01")
                 self.assertEqual(preview_data["breakdown"][0]["rows_count"], 2)
                 excluded_hash = preview_data["rows"][0]["__row_hash"]
@@ -777,7 +850,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(template_payload["name"], "Ежемесячный лимон")
                 self.assertEqual(template_payload["project_name"], "unit")
                 self.assertEqual(template_payload["category_keys"], ["lemon-oz"])
-                self.assertEqual(template_payload["selected_columns"], ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"])
+                self.assertEqual(template_payload["selected_columns"], ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (ед.)"])
 
                 templates = client.get("/api/exports/templates", params={"project_name": "unit"})
                 self.assertEqual(templates.status_code, 200)
@@ -819,15 +892,15 @@ class WebApiTest(unittest.TestCase):
                 workbook = load_workbook(xlsx_path, read_only=False)
                 worksheet = workbook.active
                 headers = [cell.value for cell in worksheet[1]]
-                self.assertEqual(headers, ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (сумм.)"])
+                self.assertEqual(headers, ["SKU", "Название", "Бренд", "Продажи, шт", "Вес, кг", "Вес, кг (ед.)"])
                 self.assertNotIn("__row_hash", headers)
                 self.assertIsNone(worksheet.auto_filter.ref)
                 self.assertIsInstance(worksheet["D2"].value, (int, float))
                 self.assertEqual(worksheet["D2"].value, 5)
                 self.assertIsInstance(worksheet["E2"].value, (int, float))
                 self.assertIsInstance(worksheet["F2"].value, (int, float))
-                self.assertEqual(worksheet["E2"].value, 0.5)
-                self.assertEqual(worksheet["F2"].value, 1.5)
+                self.assertEqual(worksheet["E2"].value, 1.5)
+                self.assertEqual(worksheet["F2"].value, 0.5)
 
                 downloaded = client.get("/api/exports/download-file", params={"path": str(xlsx_path)})
                 self.assertEqual(downloaded.status_code, 200)

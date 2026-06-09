@@ -124,6 +124,46 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result["SKU-группа"].tolist(), ["Лимонная группа"])
             self.assertEqual(step.details[0]["manual_updated_rows"], 2)
 
+    def test_classification_allows_empty_manual_overrides_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Подкатегория;Название;contains;лимон;Авто;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            input_file = root / "classified-input.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Дата": "01.06.2025",
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Тест",
+                            "SKU": "sku-1",
+                            "Название": "лимон 1 кг",
+                        }
+                    ]
+                ),
+                input_file,
+            )
+
+            result, _, step = classify_file(
+                input_file,
+                root / "classified-output.csv",
+                rules_path=rules_file,
+                manual_overrides_path=root / "manual_overrides.csv",
+            )
+
+            self.assertEqual(result["Подкатегория"].tolist(), ["Авто"])
+            self.assertEqual(step.details[0]["manual_overrides"], 0)
+
     def test_merge_dataframes_filters_sales_and_deduplicates(self) -> None:
         frame = pd.DataFrame(
             [

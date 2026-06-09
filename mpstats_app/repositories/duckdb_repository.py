@@ -69,6 +69,7 @@ RAW_EXPORT_DOUBLE_COLUMNS = (
     "Выручка, руб",
     "Выручка",
     "Вес, кг",
+    "Вес, кг (ед.)",
     "Вес, кг (сумм.)",
     "Объем, кг",
     "Объём, кг",
@@ -191,6 +192,15 @@ def _hash_expr(columns: list[str], *, project_name: str | None = None, year: int
     return "sha1(concat_ws('|', " + ", ".join(parts) + "))"
 
 
+def _weight_column_aliases(source_columns: list[str]) -> dict[str, str]:
+    if "Вес, кг (сумм.)" not in source_columns:
+        return {}
+    aliases = {"Вес, кг (сумм.)": "Вес, кг"}
+    if "Вес, кг" in source_columns and "Вес, кг (ед.)" not in source_columns:
+        aliases["Вес, кг"] = "Вес, кг (ед.)"
+    return aliases
+
+
 def _stage_has_text_values(con: Any, *, stage_table: str, column: str) -> bool:
     text_expr = f"NULLIF(TRIM(CAST({quote_duckdb_name(column)} AS VARCHAR)), '')"
     numeric_expr = _number_expr(column)
@@ -241,7 +251,11 @@ def _create_products_stage(
     if not source_columns:
         raise ValueError(f"В файле нет колонок для загрузки в DuckDB: {csv_path}")
 
-    select_parts = [quote_duckdb_name(column) for column in source_columns]
+    aliases = _weight_column_aliases(source_columns)
+    select_parts = [
+        f"{quote_duckdb_name(column)} AS {quote_duckdb_name(aliases[column])}" if column in aliases else quote_duckdb_name(column)
+        for column in source_columns
+    ]
     select_parts.extend(
         [
             f"{sql_literal(run_id)} AS {quote_duckdb_name('__run_id')}",
@@ -467,6 +481,28 @@ class DuckDbAppRepository:
     def ensure_ready(self) -> None:
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
+            self._migrate_weight_columns(con, self.settings.products_table)
+
+    def _migrate_weight_columns(self, con: Any, table_name: str) -> None:
+        if not table_exists(con, table_name):
+            return
+        columns = _table_column_types(con, table_name)
+        if "Вес, кг" not in columns:
+            return
+        quoted_table = quote_identifier(table_name)
+        if "Вес, кг (ед.)" not in columns:
+            con.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {quote_duckdb_name('Вес, кг (ед.)')} DOUBLE")
+        if "Вес, кг (сумм.)" in columns:
+            con.execute(
+                f"""
+                UPDATE {quoted_table}
+                SET
+                    {quote_duckdb_name('Вес, кг (ед.)')} = COALESCE({quote_duckdb_name('Вес, кг (ед.)')}, TRY_CAST({quote_duckdb_name('Вес, кг')} AS DOUBLE)),
+                    {quote_duckdb_name('Вес, кг')} = COALESCE(TRY_CAST({quote_duckdb_name('Вес, кг (сумм.)')} AS DOUBLE), TRY_CAST({quote_duckdb_name('Вес, кг')} AS DOUBLE))
+                WHERE {quote_duckdb_name('Вес, кг (сумм.)')} IS NOT NULL OR {quote_duckdb_name('Вес, кг (ед.)')} IS NULL
+                """
+            )
+            con.execute(f"ALTER TABLE {quoted_table} DROP COLUMN {quote_duckdb_name('Вес, кг (сумм.)')}")
 
     def _fetch_records(
         self,

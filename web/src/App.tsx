@@ -158,7 +158,7 @@ type PipelineOperation = {
   finishedAt: number | null;
 };
 
-const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (сумм.)", "Подкатегория", "Тип", "Вид мяса", "SKU-группа"];
+const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (ед.)", "Подкатегория", "Тип", "Вид мяса", "SKU-группа"];
 
 function isYandexMarketplace(value: string) {
   return ["ям", "яндекс", "яндекс маркет", "яндекс.маркет", "ym"].includes(value.trim().toLowerCase());
