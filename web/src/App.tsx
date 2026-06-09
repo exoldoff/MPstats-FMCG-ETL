@@ -143,7 +143,7 @@ type ExportFilterDraft = { id: string; column: string; match_type: string; value
 type CubeMatrixCell = { status: "ready" | "missing"; period: string; rowsCount: number; title: string };
 type CubeMatrixRow = { categoryKey: string; categoryName: string; cells: CubeMatrixCell[]; missingCount: number };
 type CubeMatrix = { marketplaces: string[]; rows: CubeMatrixRow[]; missingCount: number; totalCells: number; targetPeriods: Record<string, string> };
-type PipelineOperationKind = "start" | "pause" | "stop" | "resume" | "retry" | "rebuild" | "reclassify" | "sync";
+type PipelineOperationKind = "start" | "pause" | "stop" | "resume" | "retry" | "rebuild" | "reclassify" | "reprocess" | "sync";
 type EditableWorkspace = "catalog" | "classifier";
 type UnsavedChangesPrompt = {
   kind: EditableWorkspace;
@@ -2422,7 +2422,10 @@ export function App() {
                   className={`action-button ${activeOperationKind === "reclassify" ? "is-working" : ""}`}
                   disabled={!canRebuildCube}
                   title={runBusyTitle}
-                  onClick={() => run?.id && void runPipelineAction("reclassify", "Повторная классификация куба", "Применяются текущие правила: classified-файлы и срезы БД будут заменены по задачам плана.", () => api.reclassifyCube(run.id), (fresh) => { void refreshRun(fresh.id); })}
+                  onClick={async () => {
+                    if (!run?.id || !(await saveClassifierWorkspace())) return;
+                    void runPipelineAction("reclassify", "Повторная классификация куба", "Применяются текущие правила: classified-файлы и срезы БД будут заменены по задачам плана.", () => api.reclassifyCube(run.id), (fresh) => { void refreshRun(fresh.id); });
+                  }}
                 >
                   {activeOperationKind === "reclassify" ? <LoaderCircle className="spin" size={20} /> : <RotateCcw size={20} />}
                   <span><strong>{activeOperationKind === "reclassify" ? "Переклассификация идёт" : "Переклассифицировать куб"}</strong><small>Перезаписать classified и БД</small></span>

@@ -25,6 +25,19 @@ def _normalize_text(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().str.casefold()
 
 
+def _match_mask(out: pd.DataFrame, match_field: str, match_value: str) -> tuple[pd.Series | None, str | None]:
+    value = str(match_value).strip().casefold()
+    if match_field in out.columns:
+        mask = _normalize_text(out[match_field]).eq(value)
+        if mask.any() or match_field != "SKU" or "Артикул" not in out.columns:
+            return mask, match_field
+
+    if match_field == "SKU" and "Артикул" in out.columns:
+        return _normalize_text(out["Артикул"]).eq(value), "Артикул"
+
+    return None, None
+
+
 def _validate_and_prepare_overrides(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     missing = [column for column in MANUAL_OVERRIDE_COLUMNS if column not in out.columns]
@@ -84,7 +97,8 @@ def apply_manual_overrides(
             )
             continue
 
-        if override.match_field not in out.columns:
+        match_mask, resolved_match_field = _match_mask(out, override.match_field, override.match_value)
+        if match_mask is None:
             report_rows.append(
                 {
                     "row_num": int(override.row_num),
@@ -105,7 +119,6 @@ def apply_manual_overrides(
         if override.target_column not in out.columns:
             out[override.target_column] = pd.NA
 
-        match_mask = _normalize_text(out[override.match_field]).eq(str(override.match_value).strip().casefold())
         if override.mode == "fill_empty":
             write_mask = match_mask & _is_empty_series(out[override.target_column])
         else:
@@ -123,6 +136,7 @@ def apply_manual_overrides(
                 "applied_rows": int(write_mask.sum()),
                 "reason": "applied",
                 "match_field": override.match_field,
+                "resolved_match_field": resolved_match_field,
                 "match_value": override.match_value,
                 "target_column": override.target_column,
                 "set_value": override.set_value,

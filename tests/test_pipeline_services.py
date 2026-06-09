@@ -124,6 +124,56 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result["SKU-группа"].tolist(), ["Лимонная группа"])
             self.assertEqual(step.details[0]["manual_updated_rows"], 2)
 
+    def test_classification_treats_sku_manual_override_as_article_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Подкатегория;Название;contains;лимон;Авто;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            overrides_file = root / "manual_overrides.csv"
+            overrides_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;match_field;match_value;target_column;set_value;mode;comment",
+                        "1;1;SKU;sku-1;Подкатегория;Ручная;overwrite;unit",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            input_file = root / "classified-input.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "SKU": "sku-1",
+                            "Название": "лимон 1 кг",
+                        }
+                    ]
+                ),
+                input_file,
+            )
+
+            result, _, step = classify_file(
+                input_file,
+                root / "classified-output.csv",
+                rules_path=rules_file,
+                manual_overrides_path=overrides_file,
+            )
+
+            self.assertEqual(result["Артикул"].tolist(), ["sku-1"])
+            self.assertEqual(result["SKU"].tolist(), ["лимон 1 кг"])
+            self.assertEqual(result["Подкатегория"].tolist(), ["Ручная"])
+            self.assertEqual(step.details[0]["manual_updated_rows"], 1)
+
     def test_classification_allows_empty_manual_overrides_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
