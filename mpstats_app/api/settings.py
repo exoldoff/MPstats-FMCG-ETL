@@ -6,10 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from pipeline.step1_config import load_step1_config, save_config
 
-from mpstats_app.api.dependencies import get_classifier_rules_service, get_settings
+from mpstats_app.api.dependencies import get_classifier_rules_service, get_manual_overrides_service, get_settings
 from mpstats_app.config import AppSettings
-from mpstats_app.schemas import ClassifierRulesPayload, TextPayload
+from mpstats_app.schemas import ClassifierRulesPayload, ManualOverridesPayload, TextPayload
 from mpstats_app.services.classifier_rules_service import ClassifierRulesService
+from mpstats_app.services.manual_overrides_service import ManualOverridesService
 
 
 router = APIRouter(prefix="/api", tags=["settings"])
@@ -63,5 +64,23 @@ def put_classifier_rules(
 ) -> dict[str, object]:
     try:
         return service.save_rules([rule.model_dump() for rule in payload.rules])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/classifier/manual-overrides")
+def get_manual_overrides(
+    service: ManualOverridesService = Depends(get_manual_overrides_service),
+) -> dict[str, object]:
+    return service.list_overrides()
+
+
+@router.put("/classifier/manual-overrides")
+def put_manual_overrides(
+    payload: ManualOverridesPayload,
+    service: ManualOverridesService = Depends(get_manual_overrides_service),
+) -> dict[str, object]:
+    try:
+        return service.save_overrides([override.model_dump() for override in payload.overrides])
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

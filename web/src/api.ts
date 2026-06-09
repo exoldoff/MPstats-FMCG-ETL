@@ -45,6 +45,18 @@ export type ClassifierRule = {
   conditions: ClassifierCondition[];
 };
 
+export type ManualOverride = {
+  id: string;
+  active: boolean;
+  priority: number;
+  match_field: string;
+  match_value: string;
+  target_column: string;
+  set_value: string;
+  mode: "fill_empty" | "overwrite" | string;
+  comment: string;
+};
+
 export type WorkflowSettings = {
   cookie: string;
   project_name: string;
@@ -692,6 +704,12 @@ export const api = {
     request<{ path: string; rules: ClassifierRule[] }>("/api/classifier/rules", {
       method: "PUT",
       body: JSON.stringify({ rules })
+    }),
+  getManualOverrides: () => request<{ path: string; overrides: ManualOverride[] }>("/api/classifier/manual-overrides"),
+  saveManualOverrides: (overrides: ManualOverride[]) =>
+    request<{ path: string; overrides: ManualOverride[] }>("/api/classifier/manual-overrides", {
+      method: "PUT",
+      body: JSON.stringify({ overrides })
     }),
   classifyExternalFile: (projectName: string, file: File, writeXlsx: boolean) => {
     const params = new URLSearchParams();

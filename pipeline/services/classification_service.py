@@ -8,6 +8,7 @@ import pandas as pd
 from classifiers import engine as classifier_engine
 from pipeline.models import StepResult
 from pipeline.repositories.file_repository import read_csv_auto, write_semicolon_csv
+from pipeline.services.manual_override_service import apply_manual_overrides
 
 
 SERVICE_COLUMNS_TO_DROP = ["Вес, кг сырой", "Вес аномалия", "Вес причина", "Объем, кг"]
@@ -81,6 +82,7 @@ def classify_dataframe(
     *,
     rules_path: str | Path,
     fill_unclassified: dict[str, object] | None = None,
+    manual_overrides_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     importlib.reload(classifier_engine)
     result, report = classifier_engine.apply_classifiers(
@@ -89,11 +91,17 @@ def classify_dataframe(
         fill_unclassified=fill_unclassified,
     )
     result, dropped_columns, rename_map = postprocess_classified(result)
+    manual_report = pd.DataFrame()
+    if manual_overrides_path is not None:
+        result, manual_report = apply_manual_overrides(result, overrides_path=manual_overrides_path)
     active_report = report[report["active"] == True].copy() if "active" in report.columns else report.copy()
     updated_rows = int(active_report["applied_rows"].sum()) if "applied_rows" in active_report.columns else 0
+    manual_updated_rows = int(manual_report["applied_rows"].sum()) if "applied_rows" in manual_report.columns else 0
     meta = {
         "active_rules": len(active_report),
         "updated_rows": updated_rows,
+        "manual_overrides": len(manual_report),
+        "manual_updated_rows": manual_updated_rows,
         "dropped_columns": dropped_columns,
         "renamed_columns": rename_map,
     }
@@ -107,9 +115,15 @@ def classify_file(
     rules_path: str | Path,
     write_xlsx: bool = False,
     fill_unclassified: dict[str, object] | None = None,
+    manual_overrides_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, StepResult]:
     df = read_classification_input(input_file)
-    result_df, report, meta = classify_dataframe(df, rules_path=rules_path, fill_unclassified=fill_unclassified)
+    result_df, report, meta = classify_dataframe(
+        df,
+        rules_path=rules_path,
+        fill_unclassified=fill_unclassified,
+        manual_overrides_path=manual_overrides_path,
+    )
     out_path = write_semicolon_csv(result_df, output_file)
     if write_xlsx:
         try:

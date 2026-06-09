@@ -229,7 +229,13 @@ class WorkflowService:
         run_id = self._start_action(project_name, action)
         self.repository.mark_run_running(run_id)
         try:
-            _, _, result = classify_file(source, output, rules_path=self.settings.rules_path, write_xlsx=write_xlsx)
+            _, _, result = classify_file(
+                source,
+                output,
+                rules_path=self.settings.rules_path,
+                write_xlsx=write_xlsx,
+                manual_overrides_path=self.settings.manual_overrides_path,
+            )
             self._record_action_step(run_id, 6, result)
             self.repository.finish_run(run_id, "failed" if result.failed else "succeeded")
             payload = {

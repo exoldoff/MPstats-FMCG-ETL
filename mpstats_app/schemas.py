@@ -74,6 +74,22 @@ class ClassifierRulesPayload(BaseModel):
     rules: list[ClassifierRulePayload]
 
 
+class ManualOverridePayload(BaseModel):
+    id: str | None = None
+    active: bool = True
+    priority: int = 100
+    match_field: str = "Артикул"
+    match_value: str = ""
+    target_column: str = "Подкатегория"
+    set_value: str = ""
+    mode: str = "overwrite"
+    comment: str = ""
+
+
+class ManualOverridesPayload(BaseModel):
+    overrides: list[ManualOverridePayload]
+
+
 class CategorySourceRowPayload(BaseModel):
     id: str | None = None
     active: bool = True

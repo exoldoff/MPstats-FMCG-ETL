@@ -11,6 +11,7 @@ class AppSettings:
     db_path: Path
     config_path: Path
     rules_path: Path
+    manual_overrides_path: Path
     products_table: str = "mpstats_products"
     scheduler_poll_seconds: float = 10.0
     static_dir: Path | None = None
@@ -24,6 +25,7 @@ class AppSettings:
         db_path: str | Path | None = None,
         config_path: str | Path | None = None,
         rules_path: str | Path | None = None,
+        manual_overrides_path: str | Path | None = None,
         products_table: str = "mpstats_products",
         scheduler_poll_seconds: float = 10.0,
         static_dir: str | Path | None = None,
@@ -36,6 +38,9 @@ class AppSettings:
             db_path=Path(db_path).resolve() if db_path else root / "mpstats.duckdb",
             config_path=Path(config_path).resolve() if config_path else wd / "step1_export_config.json",
             rules_path=Path(rules_path).resolve() if rules_path else root / "classifiers" / "rules.csv",
+            manual_overrides_path=Path(manual_overrides_path).resolve()
+            if manual_overrides_path
+            else root / "classifiers" / "manual_overrides.csv",
             products_table=products_table,
             scheduler_poll_seconds=scheduler_poll_seconds,
             static_dir=Path(static_dir).resolve() if static_dir else root / "web" / "dist",

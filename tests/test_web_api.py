@@ -412,6 +412,30 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(rules_payload[1]["conditions"][0]["match_type"], "otherwise")
                 self.assertIn("conditions_json", (root / "classifiers" / "rules.csv").read_text(encoding="utf-8-sig"))
 
+                manual_response = client.put(
+                    "/api/classifier/manual-overrides",
+                    json={
+                        "overrides": [
+                            {
+                                "active": True,
+                                "priority": 10,
+                                "match_field": "Артикул",
+                                "match_value": "123",
+                                "target_column": "Подкатегория",
+                                "set_value": "Ручная",
+                                "mode": "overwrite",
+                                "comment": "unit",
+                            }
+                        ]
+                    },
+                )
+                self.assertEqual(manual_response.status_code, 200)
+                manual_payload = manual_response.json()["overrides"]
+                self.assertEqual(manual_payload[0]["match_field"], "Артикул")
+                self.assertEqual(manual_payload[0]["set_value"], "Ручная")
+                self.assertIn("manual_overrides.csv", manual_response.json()["path"])
+                self.assertIn("Артикул;123;Подкатегория;Ручная", (root / "classifiers" / "manual_overrides.csv").read_text(encoding="utf-8-sig"))
+
                 schedule_response = client.post(
                     "/api/schedules",
                     json={

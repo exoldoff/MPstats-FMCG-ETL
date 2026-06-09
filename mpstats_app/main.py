@@ -26,6 +26,7 @@ from mpstats_app.services.category_catalog_service import CategoryCatalogService
 from mpstats_app.services.classifier_rules_service import ClassifierRulesService
 from mpstats_app.services.export_service import ExportService
 from mpstats_app.services.job_service import JobService
+from mpstats_app.services.manual_overrides_service import ManualOverridesService
 from mpstats_app.services.project_service import ProjectService
 from mpstats_app.services.report_service import ReportService
 from mpstats_app.services.scheduler_service import SchedulerService
@@ -48,6 +49,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     repository = DuckDbAppRepository(app_settings)
     catalog_service = CategoryCatalogService(settings=app_settings, repository=repository)
     classifier_rules_service = ClassifierRulesService(settings=app_settings)
+    manual_overrides_service = ManualOverridesService(settings=app_settings)
     workflow_service = WorkflowService(settings=app_settings, repository=repository, catalog_service=catalog_service)
     smart_pipeline_service = SmartPipelineService(settings=app_settings, repository=repository, catalog_service=catalog_service)
     smart_plan_service = SmartPlanService(settings=app_settings, repository=repository)
@@ -76,6 +78,7 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     app.state.repository = repository
     app.state.catalog_service = catalog_service
     app.state.classifier_rules_service = classifier_rules_service
+    app.state.manual_overrides_service = manual_overrides_service
     app.state.workflow_service = workflow_service
     app.state.smart_pipeline_service = smart_pipeline_service
     app.state.smart_plan_service = smart_plan_service

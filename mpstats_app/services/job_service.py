@@ -146,6 +146,7 @@ class JobService:
                     write_xlsx=bool(run["write_xlsx"]),
                     max_weight_kg=float(run["max_weight_kg"]),
                     fill_unclassified=fill_unclassified,
+                    manual_overrides_path=self.settings.manual_overrides_path,
                     manifest_path=manifest_path,
                 )
                 final_manifest = str(manifest_path)

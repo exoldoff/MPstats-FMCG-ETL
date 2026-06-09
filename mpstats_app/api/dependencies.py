@@ -9,6 +9,7 @@ from mpstats_app.services.scheduler_service import SchedulerService
 from mpstats_app.services.category_catalog_service import CategoryCatalogService
 from mpstats_app.services.classifier_rules_service import ClassifierRulesService
 from mpstats_app.services.export_service import ExportService
+from mpstats_app.services.manual_overrides_service import ManualOverridesService
 from mpstats_app.services.report_service import ReportService
 from mpstats_app.services.smart_plan_service import SmartPlanService
 from mpstats_app.services.smart_pipeline_service import SmartPipelineService
@@ -39,6 +40,10 @@ def get_catalog_service(request: Request) -> CategoryCatalogService:
 
 def get_classifier_rules_service(request: Request) -> ClassifierRulesService:
     return request.app.state.classifier_rules_service
+
+
+def get_manual_overrides_service(request: Request) -> ManualOverridesService:
+    return request.app.state.manual_overrides_service
 
 
 def get_workflow_service(request: Request) -> WorkflowService:

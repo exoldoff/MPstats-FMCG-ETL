@@ -56,6 +56,7 @@ def run_pipeline(
     write_xlsx: bool = True,
     max_weight_kg: float = 40.0,
     fill_unclassified: dict[str, object] | None = None,
+    manual_overrides_path: str | Path | None = None,
     manifest_path: str | Path | None = None,
 ) -> list[StepResult]:
     paths.ensure_dirs()
@@ -80,6 +81,7 @@ def run_pipeline(
             rules_path=rules_path,
             write_xlsx=write_xlsx,
             fill_unclassified=fill_unclassified,
+            manual_overrides_path=manual_overrides_path,
         )
         results.append(classify_result)
 

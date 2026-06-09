@@ -53,6 +53,7 @@ import {
   ExportPreview,
   ExportTemplate,
   ExportTemplatePayload,
+  ManualOverride,
   PipelineRun,
   PipelineSettings,
   ProductSearch,
@@ -156,7 +157,7 @@ type PipelineOperation = {
   finishedAt: number | null;
 };
 
-const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (сумм.)", "Подкатегория", "Тип", "Вид мяса"];
+const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (сумм.)", "Подкатегория", "Тип", "Вид мяса", "SKU-группа"];
 
 function isYandexMarketplace(value: string) {
   return ["ям", "яндекс", "яндекс маркет", "яндекс.маркет", "ym"].includes(value.trim().toLowerCase());
@@ -471,8 +472,12 @@ export function App() {
   const [classifierRules, setClassifierRules] = useState<ClassifierRule[]>([]);
   const [rulesPath, setRulesPath] = useState("");
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const [manualOverrides, setManualOverrides] = useState<ManualOverride[]>([]);
+  const [manualOverridesPath, setManualOverridesPath] = useState("");
+  const [selectedManualOverrideId, setSelectedManualOverrideId] = useState<string | null>(null);
   const [classifierQuery, setClassifierQuery] = useState("");
   const [savedClassifierSnapshot, setSavedClassifierSnapshot] = useState<string | null>(null);
+  const [savedManualOverridesSnapshot, setSavedManualOverridesSnapshot] = useState<string | null>(null);
   const [externalClassifierFile, setExternalClassifierFile] = useState<File | null>(null);
   const [externalClassifierWriteXlsx, setExternalClassifierWriteXlsx] = useState(false);
   const [externalClassifierResult, setExternalClassifierResult] = useState<ClassificationResponse | null>(null);
@@ -606,11 +611,12 @@ export function App() {
   async function initialLoad() {
     setError(null);
     const loadErrors: string[] = [];
-    const [settingsResult, pipelineResult, categoryResult, rulesResult, projectsResult] = await Promise.allSettled([
+    const [settingsResult, pipelineResult, categoryResult, rulesResult, manualOverridesResult, projectsResult] = await Promise.allSettled([
       api.getWorkflowSettings(),
       api.getPipelineSettings(),
       api.listCategories(),
       api.getClassifierRules(),
+      api.getManualOverrides(),
       api.listProjects()
     ]);
 
@@ -650,6 +656,17 @@ export function App() {
       setSelectedRuleId((prev) => (prev && rulesResult.value.rules.some((rule) => rule.id === prev) ? prev : null));
     } else {
       addLoadError(loadErrors, "Правила классификатора", rulesResult.reason);
+    }
+
+    if (manualOverridesResult.status === "fulfilled") {
+      setManualOverridesPath(manualOverridesResult.value.path);
+      setManualOverrides(manualOverridesResult.value.overrides);
+      setSavedManualOverridesSnapshot(editorSnapshot(manualOverridesResult.value.overrides));
+      setSelectedManualOverrideId((prev) =>
+        prev && manualOverridesResult.value.overrides.some((override) => override.id === prev) ? prev : null
+      );
+    } else {
+      addLoadError(loadErrors, "Ручные правки SKU", manualOverridesResult.reason);
     }
 
     if (projectsResult.status === "fulfilled") {
@@ -1243,14 +1260,38 @@ export function App() {
       return haystack.includes(text);
     });
   }, [classifierRules, classifierQuery]);
+  const filteredManualOverrides = useMemo(() => {
+    const text = classifierQuery.trim().toLowerCase();
+    if (!text) return manualOverrides;
+    return manualOverrides.filter((override) => {
+      const haystack = [
+        override.priority,
+        override.match_field,
+        override.match_value,
+        override.target_column,
+        override.set_value,
+        override.mode,
+        override.comment
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(text);
+    });
+  }, [manualOverrides, classifierQuery]);
   const selectedRule = useMemo(() => classifierRules.find((rule) => rule.id === selectedRuleId) ?? null, [classifierRules, selectedRuleId]);
+  const selectedManualOverride = useMemo(
+    () => manualOverrides.find((override) => override.id === selectedManualOverrideId) ?? null,
+    [manualOverrides, selectedManualOverrideId]
+  );
   const catalogDirty = useMemo(
     () => savedCatalogSnapshot !== null && editorSnapshot(catalogRows) !== savedCatalogSnapshot,
     [catalogRows, savedCatalogSnapshot]
   );
   const classifierDirty = useMemo(
-    () => savedClassifierSnapshot !== null && editorSnapshot(classifierRules) !== savedClassifierSnapshot,
-    [classifierRules, savedClassifierSnapshot]
+    () =>
+      (savedClassifierSnapshot !== null && editorSnapshot(classifierRules) !== savedClassifierSnapshot) ||
+      (savedManualOverridesSnapshot !== null && editorSnapshot(manualOverrides) !== savedManualOverridesSnapshot),
+    [classifierRules, manualOverrides, savedClassifierSnapshot, savedManualOverridesSnapshot]
   );
 
   useEffect(() => {
@@ -1296,16 +1337,19 @@ export function App() {
       return;
     }
     const rules = restoreSnapshot<ClassifierRule[]>(savedClassifierSnapshot);
-    if (!rules) return;
+    const overrides = restoreSnapshot<ManualOverride[]>(savedManualOverridesSnapshot);
+    if (!rules || !overrides) return;
     setClassifierRules(rules);
+    setManualOverrides(overrides);
     setSelectedRuleId((prev) => (prev && rules.some((rule) => rule.id === prev) ? prev : null));
+    setSelectedManualOverrideId((prev) => (prev && overrides.some((override) => override.id === prev) ? prev : null));
   }
 
   async function saveDirtyWorkspace(kind: EditableWorkspace): Promise<boolean> {
     if (kind === "catalog") {
       return Boolean(await runAction("Сохранение справочника", saveCategorySource));
     }
-    return saveClassifierRules();
+    return saveClassifierWorkspace();
   }
 
   async function saveCategorySourceFromEditor() {
@@ -1571,6 +1615,51 @@ export function App() {
       setSelectedRuleId(selectedIndex >= 0 ? response.rules[selectedIndex]?.id ?? null : null);
     });
     return Boolean(response);
+  }
+
+  function updateManualOverride(id: string, patch: Partial<ManualOverride>) {
+    setManualOverrides((prev) => prev.map((override) => (override.id === id ? { ...override, ...patch } : override)));
+  }
+
+  function addManualOverride(kind: "classification" | "sku-group" = "classification") {
+    const id = `new-manual-override-${Date.now()}`;
+    const next: ManualOverride = {
+      id,
+      active: true,
+      priority: nextManualPriority(manualOverrides),
+      match_field: "Артикул",
+      match_value: "",
+      target_column: kind === "sku-group" ? "SKU-группа" : "Подкатегория",
+      set_value: "",
+      mode: "overwrite",
+      comment: ""
+    };
+    setManualOverrides((prev) => [...prev, next]);
+    setSelectedManualOverrideId(id);
+  }
+
+  function deleteManualOverride(id: string) {
+    setManualOverrides((prev) => prev.filter((override) => override.id !== id));
+    setSelectedManualOverrideId((prev) => (prev === id ? null : prev));
+  }
+
+  async function saveManualOverrides(): Promise<boolean> {
+    const selectedIndex = manualOverrides.findIndex((override) => override.id === selectedManualOverrideId);
+    const response = await runAction("Сохранение ручных правок SKU", () => api.saveManualOverrides(manualOverrides), (response) => {
+      setManualOverridesPath(response.path);
+      setManualOverrides(response.overrides);
+      setSavedManualOverridesSnapshot(editorSnapshot(response.overrides));
+      setSelectedManualOverrideId(selectedIndex >= 0 ? response.overrides[selectedIndex]?.id ?? null : null);
+    });
+    return Boolean(response);
+  }
+
+  async function saveClassifierWorkspace(): Promise<boolean> {
+    const rulesChanged = savedClassifierSnapshot !== null && editorSnapshot(classifierRules) !== savedClassifierSnapshot;
+    const overridesChanged = savedManualOverridesSnapshot !== null && editorSnapshot(manualOverrides) !== savedManualOverridesSnapshot;
+    if (rulesChanged && !(await saveClassifierRules())) return false;
+    if (overridesChanged && !(await saveManualOverrides())) return false;
+    return true;
   }
 
   async function classifyExternalFile() {
@@ -2218,6 +2307,10 @@ export function App() {
               totalRules={classifierRules.length}
               selectedRule={selectedRule}
               rulesPath={rulesPath}
+              manualOverrides={filteredManualOverrides}
+              totalManualOverrides={manualOverrides.length}
+              selectedManualOverride={selectedManualOverride}
+              manualOverridesPath={manualOverridesPath}
               query={classifierQuery}
               onQueryChange={setClassifierQuery}
               onSelect={setSelectedRuleId}
@@ -2230,6 +2323,11 @@ export function App() {
               onAddCondition={addCondition}
               onDeleteCondition={deleteCondition}
               onSave={() => void saveClassifierRules()}
+              onManualSelect={setSelectedManualOverrideId}
+              onManualAdd={addManualOverride}
+              onManualChange={updateManualOverride}
+              onManualDelete={deleteManualOverride}
+              onManualSave={() => void saveManualOverrides()}
               externalFile={externalClassifierFile}
               externalWriteXlsx={externalClassifierWriteXlsx}
               externalResult={externalClassifierResult}
@@ -2376,6 +2474,11 @@ function nextPriority(rules: ClassifierRule[]) {
   return maxPriority + 10;
 }
 
+function nextManualPriority(overrides: ManualOverride[]) {
+  const maxPriority = overrides.reduce((max, override) => Math.max(max, Number(override.priority) || 0), 0);
+  return maxPriority + 10;
+}
+
 function matchTypeLabel(type: string) {
   return matchTypes.find(([value]) => value === type)?.[1] ?? type;
 }
@@ -2405,6 +2508,14 @@ function ruleConditionSummary(rule: ClassifierRule) {
 
 function ruleActionSummary(rule: ClassifierRule) {
   return `${rule.target_column || "колонка"} = ${rule.set_value || "..."}`;
+}
+
+function manualOverrideConditionSummary(override: ManualOverride) {
+  return `${override.match_field || "поле"} = ${override.match_value || "..."}`;
+}
+
+function manualOverrideActionSummary(override: ManualOverride) {
+  return `${override.target_column || "колонка"} = ${override.set_value || "..."}`;
 }
 
 function SectionTitle(props: { icon: ReactNode; title: string; meta?: string; hint?: string }) {
@@ -3718,6 +3829,10 @@ function ClassifierRulesEditor(props: {
   totalRules: number;
   selectedRule: ClassifierRule | null;
   rulesPath: string;
+  manualOverrides: ManualOverride[];
+  totalManualOverrides: number;
+  selectedManualOverride: ManualOverride | null;
+  manualOverridesPath: string;
   query: string;
   dirty: boolean;
   onQueryChange: (value: string) => void;
@@ -3731,6 +3846,11 @@ function ClassifierRulesEditor(props: {
   onAddCondition: (ruleId: string) => void;
   onDeleteCondition: (ruleId: string, index: number) => void;
   onSave: () => void;
+  onManualSelect: (id: string) => void;
+  onManualAdd: (kind?: "classification" | "sku-group") => void;
+  onManualChange: (id: string, patch: Partial<ManualOverride>) => void;
+  onManualDelete: (id: string) => void;
+  onManualSave: () => void;
   externalFile: File | null;
   externalWriteXlsx: boolean;
   externalResult: ClassificationResponse | null;
@@ -3740,9 +3860,15 @@ function ClassifierRulesEditor(props: {
   onExternalClassify: () => void;
 }) {
   const rule = props.selectedRule;
+  const manualOverride = props.selectedManualOverride;
   return (
     <section className="panel stage-panel">
-      <SectionTitle icon={<FileSpreadsheet />} title="Классификатор" meta={props.dirty ? `${props.rules.length}/${props.totalRules} правил · не сохранено` : `${props.rules.length}/${props.totalRules} правил`} hint="Правила сохраняются в classifiers/rules.csv. JSON дополнительных условий собирается автоматически из строк условий." />
+      <SectionTitle
+        icon={<FileSpreadsheet />}
+        title="Классификатор"
+        meta={props.dirty ? `${props.rules.length}/${props.totalRules} правил · ${props.manualOverrides.length}/${props.totalManualOverrides} правок · не сохранено` : `${props.rules.length}/${props.totalRules} правил · ${props.manualOverrides.length}/${props.totalManualOverrides} правок`}
+        hint="Правила сохраняются в classifiers/rules.csv, ручные правки SKU — в classifiers/manual_overrides.csv."
+      />
       <div className="toolbar wrap">
         <label className="search-field">
           <Search size={17} />
@@ -3760,6 +3886,9 @@ function ClassifierRulesEditor(props: {
         <button className="chip-button" onClick={() => props.onAddPreset("otherwise")}>если пусто</button>
       </div>
       <p className="path-note" title={props.rulesPath}>{props.rulesPath || "Файл правил ещё не выбран"}</p>
+      <datalist id="classifier-columns">
+        {commonClassifierColumns.map((column) => <option key={column} value={column} />)}
+      </datalist>
       <div className="external-classifier">
         <div className="subsection-head">
           <div>
@@ -3802,14 +3931,68 @@ function ClassifierRulesEditor(props: {
           </div>
         ) : null}
       </div>
+      <div className="manual-overrides">
+        <div className="subsection-head">
+          <div>
+            <h3>Ручные правки SKU</h3>
+            <p>Применяются после правил и сохраняются при повторной классификации.</p>
+          </div>
+          <div className="row-actions">
+            <button className="ghost-button" title="Создать ручную правку для конкретного SKU или артикула." onClick={() => props.onManualAdd("classification")}><Plus size={17} />Правка</button>
+            <button className="ghost-button" title="Создать правку, которая записывает общую группу SKU." onClick={() => props.onManualAdd("sku-group")}><ListChecks size={17} />Объединение SKU</button>
+            <button className="ghost-button" title="Записать ручные правки в classifiers/manual_overrides.csv." onClick={props.onManualSave}><Save size={17} />Сохранить правки</button>
+          </div>
+        </div>
+        <p className="path-note" title={props.manualOverridesPath}>{props.manualOverridesPath || "Файл ручных правок ещё не создан"}</p>
+        <div className="manual-override-layout">
+          {manualOverride ? (
+            <div className="manual-override-form">
+              <SectionTitle icon={<Settings />} title="Ручная правка" hint="Правка ищет точное значение в выбранной колонке и записывает новое значение после автоматических правил." />
+              <Toggle label="Правка активна" checked={manualOverride.active} onChange={(value) => props.onManualChange(manualOverride.id, { active: value })} />
+              <div className="form-grid two-cols">
+                <label>Где искать<input list="classifier-columns" value={manualOverride.match_field} onChange={(event) => props.onManualChange(manualOverride.id, { match_field: event.target.value })} placeholder="Артикул или SKU" /></label>
+                <label>Что искать<input value={manualOverride.match_value} onChange={(event) => props.onManualChange(manualOverride.id, { match_value: event.target.value })} placeholder="Точный SKU/артикул" /></label>
+                <label>Куда записать<input list="classifier-columns" value={manualOverride.target_column} onChange={(event) => props.onManualChange(manualOverride.id, { target_column: event.target.value })} placeholder="Подкатегория, SKU-группа..." /></label>
+                <label>Что записать<input value={manualOverride.set_value} onChange={(event) => props.onManualChange(manualOverride.id, { set_value: event.target.value })} placeholder="Новое значение" /></label>
+                <label>Режим<select value={manualOverride.mode} onChange={(event) => props.onManualChange(manualOverride.id, { mode: event.target.value })}>{ruleModes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                <label>Порядок<input type="number" value={manualOverride.priority} onChange={(event) => props.onManualChange(manualOverride.id, { priority: Number(event.target.value) })} /></label>
+              </div>
+              <label className="full-width-label">Заметка<input value={manualOverride.comment} onChange={(event) => props.onManualChange(manualOverride.id, { comment: event.target.value })} placeholder="Для себя, можно пусто" /></label>
+              <button className="danger-button" title="Удалить выбранную ручную правку. Файл изменится только после сохранения." onClick={() => props.onManualDelete(manualOverride.id)}>
+                <Trash2 size={17} />Удалить правку
+              </button>
+            </div>
+          ) : (
+            <div className="classifier-empty-state compact-empty">
+              <CircleHelp size={24} />
+              <h3>Выбери правку или создай новую</h3>
+              <button className="ghost-button" onClick={() => props.onManualAdd("classification")}>
+                <Plus size={17} />Создать правку
+              </button>
+            </div>
+          )}
+          <FilterableTable
+            className="editor-list"
+            rows={props.manualOverrides}
+            rowKey={(item) => item.id}
+            emptyText="Нет ручных правок по текущему фильтру."
+            getRowClassName={(item) => manualOverride?.id === item.id ? "selected-row" : ""}
+            onRowClick={(item) => props.onManualSelect(item.id)}
+            columns={[
+              { id: "active", label: "Вкл", value: (item) => item.active ? "да" : "нет" },
+              { id: "priority", label: "Порядок", value: (item) => item.priority, numeric: true },
+              { id: "match", label: "SKU", value: manualOverrideConditionSummary, title: manualOverrideConditionSummary },
+              { id: "action", label: "Записать", value: manualOverrideActionSummary, title: manualOverrideActionSummary },
+              { id: "mode", label: "Режим", value: (item) => ruleModeLabel(item.mode) }
+            ]}
+          />
+        </div>
+      </div>
       <div className="editor-layout">
         {rule ? (
           <div className="editor-form">
             <SectionTitle icon={<Settings />} title="Правило" hint="Обычное правило проверяет выбранную колонку. Правило «если пусто» заполняет целевую колонку только там, где после правил выше ещё пусто." />
             <Toggle label="Правило активно" checked={rule.active} onChange={(value) => props.onChange(rule.id, { active: value })} />
-            <datalist id="classifier-columns">
-              {commonClassifierColumns.map((column) => <option key={column} value={column} />)}
-            </datalist>
             <div className="rule-block">
               <h3>1. Когда применять</h3>
               <div className="form-grid two-cols">

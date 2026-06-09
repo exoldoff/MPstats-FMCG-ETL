@@ -70,6 +70,60 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result["Дата"].tolist(), ["01.06.2025"])
             self.assertEqual(result["месяц"].tolist(), ["июн."])
 
+    def test_classification_applies_manual_overrides_after_postprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json",
+                        "1;1;*;Подкатегория;Название;contains;лимон;Авто;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            overrides_file = root / "manual_overrides.csv"
+            overrides_file.write_text(
+                "\n".join(
+                    [
+                        "active;priority;match_field;match_value;target_column;set_value;mode;comment",
+                        "1;1;Артикул;sku-1;Подкатегория;Ручная;overwrite;unit",
+                        "1;2;Артикул;sku-1;SKU-группа;Лимонная группа;overwrite;merge",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            input_file = root / "classified-input.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Дата": "01.06.2025",
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Тест",
+                            "SKU": "sku-1",
+                            "Название": "лимон 1 кг",
+                        }
+                    ]
+                ),
+                input_file,
+            )
+
+            result, _, step = classify_file(
+                input_file,
+                root / "classified-output.csv",
+                rules_path=rules_file,
+                manual_overrides_path=overrides_file,
+            )
+
+            self.assertEqual(result["Артикул"].tolist(), ["sku-1"])
+            self.assertEqual(result["Подкатегория"].tolist(), ["Ручная"])
+            self.assertEqual(result["SKU-группа"].tolist(), ["Лимонная группа"])
+            self.assertEqual(step.details[0]["manual_updated_rows"], 2)
+
     def test_merge_dataframes_filters_sales_and_deduplicates(self) -> None:
         frame = pd.DataFrame(
             [

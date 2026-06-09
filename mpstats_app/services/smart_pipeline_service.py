@@ -712,7 +712,13 @@ class SmartPipelineService:
             raise FileNotFoundError(f"Processed-файл не найден: {processed_path}")
         self.repository.update_pipeline_run(str(task["run_id"]), {"current_step": f"Классификация {task['category_name']} {ym(int(task['year']), int(task['month']))}"})
         self.repository.update_download_task(task_id, {"status": "classifying", "classify_status": "classifying", "error_message": None})
-        _, _, result = classify_file(processed_path, classified_path, rules_path=self.settings.rules_path, write_xlsx=False)
+        _, _, result = classify_file(
+            processed_path,
+            classified_path,
+            rules_path=self.settings.rules_path,
+            write_xlsx=False,
+            manual_overrides_path=self.settings.manual_overrides_path,
+        )
         self.repository.update_download_task(
             task_id,
             {
