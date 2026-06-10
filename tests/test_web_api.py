@@ -1692,6 +1692,52 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(saved.status_code, 200)
                 self.assertEqual(saved.json()["rows"], 1)
 
+    def test_workflow_categories_follow_global_csv_after_project_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+            source = root / "Справочник категорий MP STATS.csv"
+
+            with TestClient(app) as client:
+                initial = client.get("/api/workflow/categories")
+                self.assertEqual(initial.status_code, 200)
+                self.assertTrue(
+                    any(row["category_name"] == "Лимонная кислота" for row in initial.json()["categories"])
+                )
+
+                source.write_text(
+                    "\n".join(
+                        [
+                            "Чек;Категория;МП;FBS;От;До;Комментарий;Путь;Фильтр;Путь2;Фильтр2;Актуализация",
+                            ";Локальный второй комп;WB;1;2025;2025;;Продукты/Локальный;;;;",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8-sig",
+                )
+                settings_response = client.put(
+                    "/api/workflow/settings",
+                    json={
+                        "cookie": "",
+                        "api_token": "",
+                        "project_name": "other-project",
+                        "workflow_mode": "historical_backfill",
+                        "start_year": 2025,
+                        "start_month": 1,
+                        "end_year": 2025,
+                        "end_month": 1,
+                    },
+                )
+                self.assertEqual(settings_response.status_code, 200)
+
+                refreshed = client.get("/api/workflow/categories")
+                self.assertEqual(refreshed.status_code, 200)
+                refreshed_names = {row["category_name"] for row in refreshed.json()["categories"]}
+                self.assertIn("Локальный второй комп", refreshed_names)
+                self.assertNotIn("Лимонная кислота", refreshed_names)
+
     def test_smart_plan_compares_expected_tasks_with_local_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

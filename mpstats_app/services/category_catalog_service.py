@@ -83,14 +83,18 @@ class CategoryCatalogService:
     def __init__(self, *, settings: AppSettings, repository: DuckDbAppRepository) -> None:
         self.settings = settings
         self.repository = repository
+        self._last_source_state: tuple[str, str] | None = None
 
     def ensure_seeded(self) -> dict[str, Any]:
+        source = self.find_source()
+        if source is not None:
+            source_state = self._source_state(source)
+            if self._last_source_state != source_state or not self.repository.list_categories(active_only=False):
+                return self.import_from_file(source)
+            return {"imported": 0, "source": str(source)}
         if self.repository.list_categories(active_only=False):
             return {"imported": 0, "source": None}
-        source = self.find_source()
-        if source is None:
-            return {"imported": 0, "source": None}
-        return self.import_from_file(source)
+        return {"imported": 0, "source": None}
 
     def find_source(self) -> Path | None:
         candidates = sorted(self.settings.project_root.glob("Справочник категори*MP STATS.csv"))
@@ -103,6 +107,7 @@ class CategoryCatalogService:
         df = self._read_source(path)
         categories = self._categories_from_frame(df, path)
         self.repository.replace_categories(categories, source_file=str(path))
+        self._last_source_state = self._source_state(path)
         imported = sum(1 for category in categories if category.get("is_active", True))
         return {"imported": imported, "source": str(path)}
 
@@ -327,6 +332,10 @@ class CategoryCatalogService:
             if column in frame.columns:
                 path_count += int(frame[column].astype(str).str.strip().ne("").sum())
         return (path_count, len(frame), path.stat().st_mtime)
+
+    @staticmethod
+    def _source_state(path: Path) -> tuple[str, str]:
+        return (str(path.resolve()), hashlib.sha256(path.read_bytes()).hexdigest())
 
     @staticmethod
     def _parse_filter(raw: str) -> str | None:
