@@ -122,6 +122,10 @@ def file_sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
+def file_timestamp(path: Path) -> datetime | None:
+    return datetime.fromtimestamp(path.stat().st_mtime) if path.is_file() else None
+
+
 class SmartPipelineService:
     def __init__(
         self,
@@ -816,6 +820,14 @@ class SmartPipelineService:
             marketplace_code=str(task["marketplace_code"]),
             category_key=str(task["category_key"]),
         )
+        existing_by_category = self.repository.get_cube_entry_by_natural_key(
+            project_name=str(task["project_name"]),
+            year=int(task["year"]),
+            month=int(task["month"]),
+            marketplace_code=str(task["marketplace_code"]),
+            category_name=str(task["category_name"]),
+        )
+        existing = existing_by_category or existing
         if existing and not settings.get("overwrite_db"):
             self.repository.update_download_task(
                 task_id,
@@ -830,6 +842,12 @@ class SmartPipelineService:
         classified_path = Path(str(task["classified_file_path"]))
         if not classified_path.exists():
             raise FileNotFoundError(f"Classified-файл не найден: {classified_path}")
+        if (
+            existing_by_category
+            and str(existing_by_category.get("category_key") or "") != str(task["category_key"])
+            and settings.get("overwrite_db")
+        ):
+            self.repository.delete_cube_entry(entry_id=str(existing_by_category["id"]), table_name=self.settings.products_table)
         self.repository.update_pipeline_run(str(task["run_id"]), {"current_step": f"Сохранение {task['category_name']} {ym(int(task['year']), int(task['month']))}"})
         self.repository.update_download_task(task_id, {"status": "saving_to_db", "save_status": "saving_to_db", "error_message": None})
         inserted = self.repository.import_products_file_idempotent(
@@ -841,9 +859,11 @@ class SmartPipelineService:
             month=int(task["month"]),
             marketplace_code=str(task["marketplace_code"]),
             category_key=str(task["category_key"]),
+            category_name=str(task["category_name"]),
             source_type=normalize_source_type(task.get("source_type")),
             overwrite=bool(settings.get("overwrite_db")),
         )
+        raw_path = Path(str(task.get("raw_file_path") or ""))
         self.repository.upsert_cube_entry(
             {
                 "project_name": task["project_name"],
@@ -855,6 +875,7 @@ class SmartPipelineService:
                 "category_key": task["category_key"],
                 "category_name": task["category_name"],
                 "rows_count": inserted,
+                "exported_at": file_timestamp(raw_path) or file_timestamp(classified_path),
                 "source_processed_file_path": str(classified_path),
                 "file_hash": file_sha1(classified_path),
                 **month_day_coverage(int(task["year"]), int(task["month"])),
@@ -917,6 +938,7 @@ class SmartPipelineService:
             month=month,
             marketplace_code=str(category["mp_code"]),
             category_key=category_key,
+            category_name=str(category["category_name"]),
             raw_path=paths["raw"],
             processed_path=paths["processed"],
             classified_path=paths["classified"],
@@ -950,6 +972,7 @@ class SmartPipelineService:
         month: int,
         marketplace_code: str,
         category_key: str,
+        category_name: str,
         raw_path: Path,
         processed_path: Path,
         classified_path: Path,
@@ -962,6 +985,14 @@ class SmartPipelineService:
             marketplace_code=marketplace_code,
             category_key=category_key,
         )
+        existing_by_category = self.repository.get_cube_entry_by_natural_key(
+            project_name=project_name,
+            year=year,
+            month=month,
+            marketplace_code=marketplace_code,
+            category_name=category_name,
+        )
+        existing = existing_by_category or existing
         if existing and not overwrite_db:
             return {
                 "status": "saved_to_db",

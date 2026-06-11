@@ -376,6 +376,124 @@ class WebApiTest(unittest.TestCase):
             self.assertEqual(total, 2)
             self.assertEqual(duplicate_hashes, 0)
 
+    def test_db_import_blocks_duplicate_month_category_marketplace_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+
+            first_file = root / "first.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Сахар",
+                            "SKU": "sku-1",
+                            "Продажи, шт": "5",
+                            "Объем, кг": "1.5",
+                        }
+                    ]
+                ),
+                first_file,
+            )
+            first_inserted = repository.import_products_file_idempotent(
+                run_id="run-1",
+                csv_path=first_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar-old",
+                category_name="Сахар",
+            )
+            repository.upsert_cube_entry(
+                {
+                    "project_name": "unit",
+                    "year": 2025,
+                    "month": 1,
+                    "marketplace": "Ozon",
+                    "marketplace_code": "oz",
+                    "category_key": "sugar-old",
+                    "category_name": "Сахар",
+                    "rows_count": first_inserted,
+                    "source_processed_file_path": str(first_file),
+                    "file_hash": "first",
+                }
+            )
+
+            second_file = root / "second.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {
+                            "Маркетплейс": "Ozon",
+                            "Категория": "Сахар",
+                            "SKU": "sku-2",
+                            "Продажи, шт": "7",
+                            "Объем, кг": "2.5",
+                        }
+                    ]
+                ),
+                second_file,
+            )
+            with self.assertRaisesRegex(ValueError, "Срез уже сохранён"):
+                repository.import_products_file_idempotent(
+                    run_id="run-2",
+                    csv_path=second_file,
+                    table_name=settings.products_table,
+                    project_name="unit",
+                    year=2025,
+                    month=1,
+                    marketplace_code="oz",
+                    category_key="sugar-new",
+                    category_name="Сахар",
+                )
+
+            with connect(settings.db_path) as con:
+                total_after_block = con.execute(f"SELECT COUNT(*) FROM {settings.products_table}").fetchone()[0]
+                loads_after_block = con.execute("SELECT COUNT(*) FROM pipeline_loads").fetchone()[0]
+            self.assertEqual(total_after_block, 1)
+            self.assertEqual(loads_after_block, 1)
+
+            overwrite_inserted = repository.import_products_file_idempotent(
+                run_id="run-3",
+                csv_path=second_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="sugar-new",
+                category_name="Сахар",
+                overwrite=True,
+            )
+            repository.upsert_cube_entry(
+                {
+                    "project_name": "unit",
+                    "year": 2025,
+                    "month": 1,
+                    "marketplace": "Ozon",
+                    "marketplace_code": "oz",
+                    "category_key": "sugar-new",
+                    "category_name": "Сахар",
+                    "rows_count": overwrite_inserted,
+                    "source_processed_file_path": str(second_file),
+                    "file_hash": "second",
+                }
+            )
+
+            self.assertEqual(overwrite_inserted, 1)
+            with connect(settings.db_path) as con:
+                rows = con.execute(f"SELECT SKU FROM {settings.products_table}").fetchall()
+                registry_total = con.execute("SELECT COUNT(*) FROM cube_registry").fetchone()[0]
+                registry_key = con.execute("SELECT category_key FROM cube_registry").fetchone()[0]
+            self.assertEqual(rows, [("sku-2",)])
+            self.assertEqual(registry_total, 1)
+            self.assertEqual(registry_key, "sugar-new")
+
     def test_db_import_deduplicates_business_rows_across_source_types(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -385,11 +503,10 @@ class WebApiTest(unittest.TestCase):
 
             category_file = root / "category.csv"
             subject_file = root / "subject.csv"
-            duplicate_row = pd.DataFrame(
+            category_row = pd.DataFrame(
                 [
                     {
                         "Маркетплейс": "WB",
-                        "Категория": "Лимонная кислота",
                         "SKU": "sku-1",
                         "Название": "лимон дубль",
                         "Бренд": "Brand",
@@ -398,8 +515,9 @@ class WebApiTest(unittest.TestCase):
                     }
                 ]
             )
-            write_semicolon_csv(duplicate_row, category_file)
-            write_semicolon_csv(duplicate_row, subject_file)
+            subject_row = category_row.copy()
+            write_semicolon_csv(category_row, category_file)
+            write_semicolon_csv(subject_row, subject_file)
 
             first_inserted = repository.import_products_file_idempotent(
                 run_id="run-category",
@@ -622,6 +740,21 @@ class WebApiTest(unittest.TestCase):
                     selected_category_ids=["category-1"],
                     settings={},
                 )
+                csv_path = root / "classified.csv"
+                write_semicolon_csv(
+                    pd.DataFrame([{"Маркетплейс": "Ozon", "Категория": "Тест", "Название": "Товар"}]),
+                    csv_path,
+                )
+                inserted = repository.import_products_file_idempotent(
+                    run_id="plan-1",
+                    csv_path=csv_path,
+                    table_name=settings.products_table,
+                    project_name="unit",
+                    year=2025,
+                    month=1,
+                    marketplace_code="oz",
+                    category_key="test",
+                )
                 repository.upsert_cube_entry(
                     {
                         "project_name": "unit",
@@ -631,28 +764,13 @@ class WebApiTest(unittest.TestCase):
                         "marketplace_code": "oz",
                         "category_key": "test",
                         "category_name": "Тест",
-                        "rows_count": 1,
+                        "rows_count": inserted,
                         "days_loaded": 17,
                         "days_in_month": 31,
                         "data_actual_until": "2025-01-17",
                         "source_processed_file_path": "unit.csv",
                         "file_hash": "hash",
                     }
-                )
-                csv_path = root / "classified.csv"
-                write_semicolon_csv(
-                    pd.DataFrame([{"Маркетплейс": "Ozon", "Категория": "Тест", "Название": "Товар"}]),
-                    csv_path,
-                )
-                repository.import_products_file_idempotent(
-                    run_id="plan-1",
-                    csv_path=csv_path,
-                    table_name=settings.products_table,
-                    project_name="unit",
-                    year=2025,
-                    month=1,
-                    marketplace_code="oz",
-                    category_key="test",
                 )
                 project_dir = root / "data" / "projects" / "unit"
                 (project_dir / "raw").mkdir(parents=True)
@@ -671,6 +789,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(cube_item["days_loaded"], 17)
                 self.assertEqual(cube_item["days_in_month"], 31)
                 self.assertEqual(cube_item["data_actual_until"], "2025-01-17")
+                self.assertIsNotNone(cube_item["exported_at"])
 
                 deleted = client.delete("/api/projects", params={"project_name": "unit", "delete_files": True})
                 self.assertEqual(deleted.status_code, 200)

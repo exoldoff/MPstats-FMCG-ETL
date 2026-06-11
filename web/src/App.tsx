@@ -4388,6 +4388,13 @@ function CubeTable(props: { items: CubeItem[]; busy: boolean; onDelete: (item: C
           numeric: true
         },
         {
+          id: "exported",
+          label: "Выгружено",
+          value: (item) => item.exported_at ?? "",
+          render: (item) => item.exported_at ? formatDateTime(item.exported_at) : "-",
+          title: (item) => item.exported_at ? `Дата выгрузки: ${formatDateTime(item.exported_at)}` : "Дата выгрузки не сохранена."
+        },
+        {
           id: "source",
           label: "Источник",
           value: (item) => item.source_processed_file_path ?? "-",

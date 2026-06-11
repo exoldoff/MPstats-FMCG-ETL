@@ -74,6 +74,12 @@ CSV_DECIMAL_COMMA_PROTECTED_COLUMNS = {
     "подкатегория",
     "тип",
 }
+
+
+class DuplicateCubeSliceError(ValueError):
+    pass
+
+
 RAW_EXPORT_DOUBLE_COLUMNS = (
     "Продажи, шт",
     "Продажи",
@@ -181,6 +187,27 @@ def _number_expr(column: str, *, table_alias: str | None = None) -> str:
         f"REPLACE(REPLACE(REPLACE(CAST({quoted} AS VARCHAR), '{nbsp}', ''), ' ', ''), ',', '.') "
         "AS DOUBLE)"
     )
+
+
+def _normalized_text_expr(column: str, *, table_alias: str | None = None) -> str:
+    quoted = quote_duckdb_name(column)
+    if table_alias:
+        quoted = f"{table_alias}.{quoted}"
+    return f"lower(trim(CAST({quoted} AS VARCHAR)))"
+
+
+def _stage_single_text_value(con: Any, *, stage_table: str, column: str) -> str | None:
+    text_expr = f"NULLIF(TRIM(CAST({quote_duckdb_name(column)} AS VARCHAR)), '')"
+    row = con.execute(
+        f"""
+        SELECT MIN({text_expr}) AS value, COUNT(DISTINCT {_normalized_text_expr(column)}) AS variants
+        FROM {quote_identifier(stage_table)}
+        WHERE {text_expr} IS NOT NULL
+        """
+    ).fetchone()
+    if not row or int(row[1] or 0) != 1:
+        return None
+    return str(row[0])
 
 
 def _positive_import_filter(columns: list[str]) -> str:
@@ -400,6 +427,112 @@ def _backfill_business_row_hash(
           )
         """,
         [project_name, int(year), int(month), marketplace_code],
+    )
+
+
+def _fetch_cube_entry_by_natural_key(
+    con: Any,
+    *,
+    project_name: str,
+    year: int,
+    month: int,
+    marketplace_code: str,
+    category_name: str,
+) -> dict[str, Any] | None:
+    result = con.execute(
+        """
+        SELECT *
+        FROM cube_registry
+        WHERE project_name = ?
+          AND year = ?
+          AND month = ?
+          AND marketplace_code = ?
+          AND lower(trim(CAST(category_name AS VARCHAR))) = lower(trim(CAST(? AS VARCHAR)))
+        ORDER BY saved_to_db_at DESC
+        LIMIT 1
+        """,
+        [project_name, int(year), int(month), marketplace_code, category_name],
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    columns = [column[0] for column in result.description]
+    return clean_record(dict(zip(columns, row)))
+
+
+def _product_slice_count_by_natural_key(
+    con: Any,
+    *,
+    table_name: str,
+    quoted_table: str,
+    project_name: str,
+    year: int,
+    month: int,
+    marketplace_code: str,
+    category_name: str,
+) -> int:
+    columns = set(_table_column_types(con, table_name))
+    required = {"__project_name", "__year", "__month", "__marketplace_code", "Категория"}
+    if not required.issubset(columns):
+        return 0
+    row = con.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {quoted_table}
+        WHERE {quote_duckdb_name('__project_name')} = ?
+          AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
+          AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
+          AND {quote_duckdb_name('__marketplace_code')} = ?
+          AND {_normalized_text_expr('Категория')} = lower(trim(CAST(? AS VARCHAR)))
+        """,
+        [project_name, int(year), int(month), marketplace_code, category_name],
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _delete_product_slice_by_natural_key(
+    con: Any,
+    *,
+    table_name: str,
+    quoted_table: str,
+    project_name: str,
+    year: int,
+    month: int,
+    marketplace_code: str,
+    category_name: str,
+) -> int:
+    rows = _product_slice_count_by_natural_key(
+        con,
+        table_name=table_name,
+        quoted_table=quoted_table,
+        project_name=project_name,
+        year=year,
+        month=month,
+        marketplace_code=marketplace_code,
+        category_name=category_name,
+    )
+    if not rows:
+        return 0
+    con.execute(
+        f"""
+        DELETE FROM {quoted_table}
+        WHERE {quote_duckdb_name('__project_name')} = ?
+          AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
+          AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
+          AND {quote_duckdb_name('__marketplace_code')} = ?
+          AND {_normalized_text_expr('Категория')} = lower(trim(CAST(? AS VARCHAR)))
+        """,
+        [project_name, int(year), int(month), marketplace_code, category_name],
+    )
+    return rows
+
+
+def _duplicate_cube_slice_message(*, project_name: str, year: int, month: int, marketplace_code: str, category_name: str) -> str:
+    return (
+        "Срез уже сохранён в кубе: "
+        f"проект={project_name}, месяц={year}-{month:02d}, "
+        f"маркетплейс={marketplace_code}, категория={category_name}. "
+        "Удалите старый срез в разделе Данные -> Куб или включите Перезаписывать БД для осознанной замены."
     )
 
 
@@ -1314,6 +1447,30 @@ class DuckDbAppRepository:
             [project_name, int(year), int(month), marketplace_code, category_key],
         )
 
+    def get_cube_entry_by_natural_key(
+        self,
+        *,
+        project_name: str,
+        year: int,
+        month: int,
+        marketplace_code: str,
+        category_name: str,
+    ) -> dict[str, Any] | None:
+        return self._fetch_one(
+            """
+            SELECT *
+            FROM cube_registry
+            WHERE project_name = ?
+              AND year = ?
+              AND month = ?
+              AND marketplace_code = ?
+              AND lower(trim(CAST(category_name AS VARCHAR))) = lower(trim(CAST(? AS VARCHAR)))
+            ORDER BY saved_to_db_at DESC
+            LIMIT 1
+            """,
+            [project_name, int(year), int(month), marketplace_code, category_name],
+        )
+
     def get_cube_entry_by_id(self, entry_id: str) -> dict[str, Any] | None:
         return self._fetch_one("SELECT * FROM cube_registry WHERE id = ?", [entry_id])
 
@@ -1326,17 +1483,19 @@ class DuckDbAppRepository:
                 INSERT INTO cube_registry (
                     id, project_name, year, month, marketplace, marketplace_code,
                     source_type, category_key, category_name, rows_count, saved_to_db_at,
+                    exported_at,
                     source_processed_file_path, file_hash, days_loaded,
                     days_in_month, data_actual_until, data_mode, is_heavy,
                     heavy_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), COALESCE(?, now()), ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (project_name, year, month, marketplace_code, category_key) DO UPDATE SET
                     marketplace = EXCLUDED.marketplace,
                     source_type = EXCLUDED.source_type,
                     category_name = EXCLUDED.category_name,
                     rows_count = EXCLUDED.rows_count,
                     saved_to_db_at = now(),
+                    exported_at = EXCLUDED.exported_at,
                     source_processed_file_path = EXCLUDED.source_processed_file_path,
                     file_hash = EXCLUDED.file_hash,
                     days_loaded = EXCLUDED.days_loaded,
@@ -1357,6 +1516,7 @@ class DuckDbAppRepository:
                     entry["category_key"],
                     entry["category_name"],
                     int(entry.get("rows_count") or 0),
+                    entry.get("exported_at"),
                     entry.get("source_processed_file_path"),
                     entry.get("file_hash"),
                     entry.get("days_loaded"),
@@ -1882,6 +2042,7 @@ class DuckDbAppRepository:
         month: int,
         marketplace_code: str,
         category_key: str,
+        category_name: str | None = None,
         source_type: str = "category",
         overwrite: bool = False,
         load_name: str | None = None,
@@ -1919,6 +2080,54 @@ class DuckDbAppRepository:
                         category_key=category_key,
                     )
                     exists = table_exists(con, table_name)
+                    effective_category_name = category_name
+                    delete_natural_slice = False
+                    if not effective_category_name and "Категория" in stage_columns:
+                        effective_category_name = _stage_single_text_value(con, stage_table=stage_table, column="Категория")
+                    if effective_category_name:
+                        registry_conflict = _fetch_cube_entry_by_natural_key(
+                            con,
+                            project_name=project_name,
+                            year=int(year),
+                            month=int(month),
+                            marketplace_code=marketplace_code,
+                            category_name=effective_category_name,
+                        )
+                        if registry_conflict and not overwrite:
+                            raise DuplicateCubeSliceError(
+                                _duplicate_cube_slice_message(
+                                    project_name=project_name,
+                                    year=int(year),
+                                    month=int(month),
+                                    marketplace_code=marketplace_code,
+                                    category_name=effective_category_name,
+                                )
+                            )
+                        if exists:
+                            product_conflict_rows = _product_slice_count_by_natural_key(
+                                con,
+                                table_name=table_name,
+                                quoted_table=quoted_table,
+                                project_name=project_name,
+                                year=int(year),
+                                month=int(month),
+                                marketplace_code=marketplace_code,
+                                category_name=effective_category_name,
+                            )
+                            if product_conflict_rows and not overwrite:
+                                raise DuplicateCubeSliceError(
+                                    _duplicate_cube_slice_message(
+                                        project_name=project_name,
+                                        year=int(year),
+                                        month=int(month),
+                                        marketplace_code=marketplace_code,
+                                        category_name=effective_category_name,
+                                    )
+                                )
+                            if product_conflict_rows and overwrite:
+                                delete_natural_slice = True
+                        if registry_conflict and overwrite and str(registry_conflict.get("category_key") or "") != str(category_key):
+                            con.execute("DELETE FROM cube_registry WHERE id = ?", [registry_conflict["id"]])
                     if not exists:
                         con.execute(f"CREATE TABLE {quoted_table} AS SELECT * FROM {quote_identifier(stage_table)}")
                         inserted = _stage_count(con, stage_table)
@@ -1939,6 +2148,17 @@ class DuckDbAppRepository:
                             month=int(month),
                             marketplace_code=marketplace_code,
                         )
+                        if effective_category_name and delete_natural_slice:
+                            _delete_product_slice_by_natural_key(
+                                con,
+                                table_name=table_name,
+                                quoted_table=quoted_table,
+                                project_name=project_name,
+                                year=int(year),
+                                month=int(month),
+                                marketplace_code=marketplace_code,
+                                category_name=effective_category_name,
+                            )
                         con.execute(
                             f"""
                             DELETE FROM {quoted_table}

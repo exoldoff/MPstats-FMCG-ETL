@@ -347,6 +347,7 @@ export type CubeItem = {
   heavy_reason?: string | null;
   reports_built_at?: string | null;
   saved_to_db_at: string;
+  exported_at?: string | null;
   source_processed_file_path?: string | null;
 };
 
