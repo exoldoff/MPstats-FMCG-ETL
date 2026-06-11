@@ -162,6 +162,7 @@ type PipelineOperation = {
   finishedAt: number | null;
 };
 
+const modalPipelineOperationKinds = new Set<PipelineOperationKind>(["rebuild", "reclassify", "reprocess"]);
 const commonClassifierColumns = ["Название", "SKU", "Артикул", "Бренд", "Категория", "Вес, кг", "Вес, кг (ед.)", "Подкатегория", "Тип", "Вид мяса", "SKU-группа"];
 
 function isYandexMarketplace(value: string) {
@@ -505,6 +506,7 @@ export function App() {
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [fileKindFilter, setFileKindFilter] = useState<FileKindFilter>("all");
   const [cube, setCube] = useState<CubeItem[]>([]);
+  const [cubeTotal, setCubeTotal] = useState(0);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectQuery, setProjectQuery] = useState("");
   const [qualityProjects, setQualityProjects] = useState<QualityProject[]>([]);
@@ -719,6 +721,7 @@ export function App() {
     try {
       const cubeResponse = await api.listCube(loadedProjectName);
       setCube(cubeResponse.items);
+      setCubeTotal(cubeResponse.total ?? cubeResponse.items.length);
     } catch (exc) {
       addLoadError(loadErrors, "Куб", exc);
     }
@@ -744,6 +747,7 @@ export function App() {
       const [fileResponse, cubeResponse] = await Promise.all([api.listFiles(targetProjectName), api.listCube(targetProjectName)]);
       setFiles(fileResponse.files);
       setCube(cubeResponse.items);
+      setCubeTotal(cubeResponse.total ?? cubeResponse.items.length);
     } catch (exc) {
       setError(`Файлы и куб: ${errorText(exc)}`);
     }
@@ -753,6 +757,7 @@ export function App() {
     try {
       const cubeResponse = await api.listCube(targetProjectName);
       setCube(cubeResponse.items);
+      setCubeTotal(cubeResponse.total ?? cubeResponse.items.length);
     } catch (exc) {
       setError(`Куб: ${errorText(exc)}`);
     }
@@ -784,6 +789,7 @@ export function App() {
     ]);
     setRuns(runResponse.runs);
     setCube(cubeResponse.items);
+    setCubeTotal(cubeResponse.total ?? cubeResponse.items.length);
     setFiles(fileResponse.files);
     if (runResponse.runs[0]) {
       setRun(runResponse.runs[0]);
@@ -810,6 +816,7 @@ export function App() {
       setSmartPlan(null);
       setFiles([]);
       setCube([]);
+      setCubeTotal(0);
       setProducts(null);
       const settings = await api.saveWorkflowSettings({
         cookie,
@@ -1210,7 +1217,7 @@ export function App() {
       const result = await action();
       onSuccess?.(result);
       const backgroundRun = isPipelineRun(result) && isActiveRunStatus(result.status);
-      setMessage(backgroundRun ? `${label}: запущено, прогресс открыт` : `${label}: готово`);
+      setMessage(backgroundRun ? `${label}: запущено, прогресс виден в текущем запуске` : `${label}: готово`);
       if (!backgroundRun) {
         if (tab === "files" || tab === "cube") {
           await refreshFilesAndCube();
@@ -1823,6 +1830,7 @@ export function App() {
           ? "Дождись завершения текущего запуска или поставь его на паузу."
           : undefined;
   const runBusyTitle = runIsActive ? "Дождись завершения текущей операции или поставь запуск на паузу." : undefined;
+  const visiblePipelineOperation = pipelineOperation && modalPipelineOperationKinds.has(pipelineOperation.kind) ? pipelineOperation : null;
   const showStartupSplash = startupSplashPhase !== "hidden";
 
   return (
@@ -1864,9 +1872,9 @@ export function App() {
 
       {error ? <Notice tone="error" text={error} onClose={() => setError(null)} /> : null}
       {message ? <Notice tone="success" text={message} onClose={() => setMessage(null)} /> : null}
-      {pipelineOperation ? (
+      {visiblePipelineOperation ? (
         <PipelineOperationModal
-          operation={pipelineOperation}
+          operation={visiblePipelineOperation}
           run={operationRun}
           onClose={() => setPipelineOperation(null)}
           onOpenPlan={() => changeTab("plan")}
@@ -2153,7 +2161,7 @@ export function App() {
                   </div>
                 )}
               </div>
-              {smartPlan ? <SmartPlanOverview plan={smartPlan} /> : null}
+              {smartPlan ? <SmartPlanOverview plan={smartPlan} cubeTotal={cubeTotal} /> : null}
               <CubeMatrixTable items={cube} />
               <div className="toolbar wrap">
                 {smartPlanFilters.map((filter) => (
@@ -2929,7 +2937,7 @@ function FilesTable(props: { files: ProjectFile[]; busy: boolean; onDelete: (fil
   );
 }
 
-function SmartPlanOverview(props: { plan: SmartPlan }) {
+function SmartPlanOverview(props: { plan: SmartPlan; cubeTotal: number }) {
   const summary = props.plan.summary;
   const cards: Array<{ status: SmartPlanStatus; label: string }> = [
     { status: "ready", label: "Готово" },
@@ -2947,9 +2955,9 @@ function SmartPlanOverview(props: { plan: SmartPlan }) {
             <strong>{summary[card.status]}</strong>
           </div>
         ))}
-        <div className="smart-plan-card db">
+        <div className="smart-plan-card db" title="Всего сохранённых срезов в кубе текущего проекта, независимо от выбранного плана из истории.">
           <span>В БД</span>
-          <strong>{summary.saved_to_db}</strong>
+          <strong>{props.cubeTotal}</strong>
         </div>
       </div>
       <div className={`recommended-action ${props.plan.recommended_action.key}`}>

@@ -1388,6 +1388,13 @@ class DuckDbAppRepository:
             [project_name, int(limit)],
         )
 
+    def count_cube_registry(self, *, project_name: str) -> int:
+        row = self._fetch_one(
+            "SELECT COUNT(*) AS total FROM cube_registry WHERE project_name = ?",
+            [project_name],
+        )
+        return int(row["total"] if row else 0)
+
     def list_cube_registry_by_source_file(self, *, project_name: str, source_file_path: str) -> list[dict[str, Any]]:
         return self._fetch_records(
             """

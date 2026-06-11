@@ -666,6 +666,7 @@ class WebApiTest(unittest.TestCase):
                 self.assertTrue(unit["has_files"])
                 cube = client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"})
                 self.assertEqual(cube.status_code, 200)
+                self.assertEqual(cube.json()["total"], 1)
                 cube_item = cube.json()["items"][0]
                 self.assertEqual(cube_item["days_loaded"], 17)
                 self.assertEqual(cube_item["days_in_month"], 31)

@@ -284,7 +284,10 @@ class SmartPipelineService:
         return {"root": str(root), "files": files[:1000]}
 
     def list_cube(self, *, project_name: str) -> dict[str, Any]:
-        return {"items": self.repository.list_cube_registry(project_name=project_name)}
+        return {
+            "items": self.repository.list_cube_registry(project_name=project_name),
+            "total": self.repository.count_cube_registry(project_name=project_name),
+        }
 
     def delete_run(self, *, run_id: str) -> dict[str, Any]:
         run = self.repository.get_pipeline_run(run_id)
