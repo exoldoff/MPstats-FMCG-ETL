@@ -4,10 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import pandas as pd
-
 from pipeline.repositories.data_quality_repository import DataQualityRepository
-from pipeline.repositories.file_repository import write_semicolon_csv
+from pipeline.repositories.sql_repository import apply_migrations, connect
 from pipeline.services.data_quality_service import DataQualityService
 
 
@@ -15,14 +13,59 @@ def make_service(root: Path) -> DataQualityService:
     return DataQualityService(DataQualityRepository(project_root=root, workdir=root / "pipeline"))
 
 
-def write_quality_csv(root: Path, project_name: str, rows: list[dict[str, object]], *, classified: bool = True) -> Path:
-    folder = "processed" if classified else "merged"
-    suffix = "_classified.csv" if classified else ".csv"
-    project_dir = root / "data" / "projects" / project_name / folder
-    project_dir.mkdir(parents=True, exist_ok=True)
-    path = project_dir / f"{project_name}{suffix}"
-    write_semicolon_csv(pd.DataFrame(rows), path)
-    return path
+def write_quality_cube(root: Path, project_name: str, rows: list[dict[str, object]]) -> Path:
+    db_path = root / "mpstats.duckdb"
+    root.mkdir(parents=True, exist_ok=True)
+    table_name = "mpstats_products"
+    metadata = ["__project_name", "__year", "__month", "__marketplace_code", "__category_key", "__source_file"]
+    row_columns: list[str] = []
+    for item in rows:
+        for column in item:
+            if column not in row_columns:
+                row_columns.append(column)
+    if not row_columns:
+        row_columns = ["Дата", "Категория", "SKU", "Продажи, шт", "Средняя цена, руб", "Выручка, руб"]
+    columns = [*metadata, *row_columns]
+    with connect(db_path) as con:
+        apply_migrations(con)
+        con.execute(f"CREATE TABLE IF NOT EXISTS {quote_name(table_name)} ({', '.join(f'{quote_name(column)} VARCHAR' for column in columns)})")
+        for column in columns:
+            con.execute(f"ALTER TABLE {quote_name(table_name)} ADD COLUMN IF NOT EXISTS {quote_name(column)} VARCHAR")
+        con.execute(f"DELETE FROM {quote_name(table_name)} WHERE {quote_name('__project_name')} = ?", [project_name])
+        for item in rows:
+            month = _month_from_row(item)
+            category = str(item.get("Категория") or "category")
+            payload = {
+                "__project_name": project_name,
+                "__year": "2025",
+                "__month": str(month),
+                "__marketplace_code": "oz",
+                "__category_key": category,
+                "__source_file": f"cube/{project_name}/{month:02d}/{category}.csv",
+                **{key: str(value) for key, value in item.items()},
+            }
+            placeholders = ", ".join("?" for _ in columns)
+            con.execute(
+                f"INSERT INTO {quote_name(table_name)} ({', '.join(quote_name(column) for column in columns)}) VALUES ({placeholders})",
+                [payload.get(column) for column in columns],
+            )
+        con.execute("DELETE FROM cube_registry WHERE project_name = ?", [project_name])
+        registry: dict[tuple[int, str], int] = {}
+        for item in rows or [{"Дата": "01.01.2025", "Категория": "empty"}]:
+            key = (_month_from_row(item), str(item.get("Категория") or "empty"))
+            registry[key] = registry.get(key, 0) + (1 if rows else 0)
+        for (month, category), count in registry.items():
+            con.execute(
+                """
+                INSERT INTO cube_registry (
+                    id, project_name, year, month, marketplace, marketplace_code,
+                    category_key, category_name, rows_count, source_processed_file_path
+                )
+                VALUES (?, ?, 2025, ?, 'Ozon', 'oz', ?, ?, ?, ?)
+                """,
+                [f"{project_name}-{month}-{category}", project_name, month, category, category, count, f"cube/{project_name}/{month:02d}/{category}.csv"],
+            )
+    return db_path
 
 
 def row(
@@ -54,6 +97,18 @@ def issue_ids(report: dict[str, object]) -> set[str]:
     return {str(issue["check_id"]) for issue in report.get("issues", [])}
 
 
+def quote_name(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _month_from_row(item: dict[str, object]) -> int:
+    date = str(item.get("Дата") or "01.01.2025")
+    try:
+        return int(date.split(".")[1])
+    except (IndexError, ValueError):
+        return 1
+
+
 class DataQualityServiceTest(unittest.TestCase):
     def test_normal_sku_history_is_ok(self) -> None:
         """Стабильная история без скачков не должна шуметь.
@@ -74,18 +129,19 @@ class DataQualityServiceTest(unittest.TestCase):
                 row("03", "sku-2", 20, brand="Brand B"),
                 row("04", "sku-2", 18, brand="Brand B"),
             ]
-            write_quality_csv(root, "unit", rows)
+            write_quality_cube(root, "unit", rows)
 
             report = make_service(root).build_report("unit")
 
             self.assertEqual(report["status"], "OK")
+            self.assertEqual(report["source"]["kind"], "cube")
             self.assertEqual(report["metrics"]["summary_by_severity"]["total"], 0)
 
     def test_sales_spike_warns(self) -> None:
         """Резкий рост SKU ловится только при большом абсолютном эффекте."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_quality_csv(
+            write_quality_cube(
                 root,
                 "unit",
                 [row("01", "sku-1", 20), row("02", "sku-1", 22), row("03", "sku-1", 21), row("04", "sku-1", 500)],
@@ -100,7 +156,7 @@ class DataQualityServiceTest(unittest.TestCase):
         """Провал стабильного SKU почти до нуля считается бизнес-предупреждением."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_quality_csv(
+            write_quality_cube(
                 root,
                 "unit",
                 [row("01", "sku-1", 100), row("02", "sku-1", 110), row("03", "sku-1", 120), row("04", "sku-1", 0, revenue=0)],
@@ -115,7 +171,7 @@ class DataQualityServiceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             rows = [row("01", "base", 20), row("02", "base", 20), row("03", "base", 20), row("04", "base", 20), row("04", "new", 5)]
-            write_quality_csv(root, "unit", rows)
+            write_quality_cube(root, "unit", rows)
 
             report = make_service(root).build_report("unit")
 
@@ -127,7 +183,7 @@ class DataQualityServiceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             rows = [row("01", "base", 20), row("02", "base", 20), row("03", "base", 20), row("04", "base", 20), row("04", "new", 800)]
-            write_quality_csv(root, "unit", rows)
+            write_quality_cube(root, "unit", rows)
 
             report = make_service(root).build_report("unit")
 
@@ -145,7 +201,7 @@ class DataQualityServiceTest(unittest.TestCase):
                 row("04", "price-jump", 10, price=100),
                 row("04", "negative", 10, price=-5, revenue=50),
             ]
-            write_quality_csv(root, "unit", rows)
+            write_quality_cube(root, "unit", rows)
 
             report = make_service(root).build_report("unit")
 
@@ -158,7 +214,7 @@ class DataQualityServiceTest(unittest.TestCase):
         """Один SKU в одной категории и месяце в нескольких строках — бизнес-дубль."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_quality_csv(root, "unit", [row("01", "sku-1", 10), row("01", "sku-1", 10), row("02", "sku-1", 11)])
+            write_quality_cube(root, "unit", [row("01", "sku-1", 10), row("01", "sku-1", 10), row("02", "sku-1", 11)])
 
             report = make_service(root).build_report("unit")
 
@@ -169,7 +225,7 @@ class DataQualityServiceTest(unittest.TestCase):
         """Пропущенный месяц между загруженными периодами виден отдельным issue."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_quality_csv(root, "unit", [row("01", "sku-1", 10), row("02", "sku-1", 10), row("04", "sku-1", 10)])
+            write_quality_cube(root, "unit", [row("01", "sku-1", 10), row("02", "sku-1", 10), row("04", "sku-1", 10)])
 
             report = make_service(root).build_report("unit")
 
@@ -183,7 +239,7 @@ class DataQualityServiceTest(unittest.TestCase):
             for month in ("01", "02", "03"):
                 rows.extend(row(month, f"sku-{index}", 1, brand=f"Brand {index}") for index in range(20))
             rows.extend(row("04", f"sku-{index}", 1, brand=f"Brand {index}") for index in range(4))
-            write_quality_csv(root, "unit", rows)
+            write_quality_cube(root, "unit", rows)
 
             report = make_service(root).build_report("unit")
 
@@ -201,7 +257,7 @@ class DataQualityServiceTest(unittest.TestCase):
                 rows.append(row(month, "brand-b", 95, brand="Brand B"))
             rows.append(row("04", "brand-a", 80, brand="Brand A"))
             rows.append(row("04", "brand-b", 20, brand="Brand B"))
-            write_quality_csv(root, "unit", rows)
+            write_quality_cube(root, "unit", rows)
 
             report = make_service(root).build_report("unit")
 
@@ -211,7 +267,7 @@ class DataQualityServiceTest(unittest.TestCase):
         """ТО сравнивается с продажи × цена с допуском, а не как жёсткое равенство."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_quality_csv(root, "unit", [row("01", "sku-1", 10, price=10, revenue=500)])
+            write_quality_cube(root, "unit", [row("01", "sku-1", 10, price=10, revenue=500)])
 
             report = make_service(root).build_report("unit")
 
@@ -220,8 +276,7 @@ class DataQualityServiceTest(unittest.TestCase):
     def test_empty_file_fails_and_missing_project_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            path = write_quality_csv(root, "empty", [], classified=True)
-            pd.DataFrame(columns=["Дата", "SKU", "Продажи, шт"]).to_csv(path, sep=";", index=False, encoding="utf-8-sig")
+            write_quality_cube(root, "empty", [])
             service = make_service(root)
 
             report = service.build_report("empty")

@@ -19,7 +19,7 @@ from pipeline.data_quality.checks import (
 )
 from pipeline.data_quality.config import DataQualityConfig
 from pipeline.data_quality.models import QualityContext, QualityIssue, SkippedCheck, issues_to_payload
-from pipeline.data_quality.sql import prepare_quality_tables
+from pipeline.data_quality.sql import prepare_quality_tables, prepare_quality_tables_from_cube
 from pipeline.repositories.data_quality_repository import QualityDataSource
 from pipeline.repositories.sql_repository import duckdb_connection
 
@@ -46,24 +46,39 @@ class DataQualityRunner:
 
     def run(self, source: QualityDataSource) -> dict[str, Any]:
         if not source.paths:
-            return self._fail_report(source, "Итоговый CSV для проекта не найден.")
+            return self._fail_report(source, "Источник качества для проекта не найден.")
 
         try:
-            with duckdb_connection(":memory:", temp_directory=self.temp_directory) as con:
-                prepared = prepare_quality_tables(con, source.paths)
-                if prepared.total_rows == 0:
-                    return self._fail_report(source, "В итоговом файле 0 строк.", total_rows=0)
-
-                skipped: list[SkippedCheck] = []
-                ctx = QualityContext(con=con, config=self.config, prepared=prepared, skipped_checks=skipped)
-                issues: list[QualityIssue] = []
-                for check in CHECKS:
-                    issues.extend(check(ctx))
-                return self._report(source=source, total_rows=prepared.total_rows, issues=issues, skipped=skipped, columns=prepared.columns)
+            db_path = source.primary_path if source.source_kind == "cube" else None
+            connection_path = db_path if db_path else ":memory:"
+            with duckdb_connection(connection_path, temp_directory=self.temp_directory) as con:
+                if source.source_kind == "cube":
+                    if not source.table_name or not db_path:
+                        return self._fail_report(source, "Источник куба не настроен.")
+                    prepared = prepare_quality_tables_from_cube(
+                        con,
+                        table_name=source.table_name,
+                        project_name=source.project_name,
+                        db_path=db_path,
+                    )
+                else:
+                    prepared = prepare_quality_tables(con, source.paths)
+                return self._run_checks(source, prepared, con)
         except EmptyDataError:
-            return self._fail_report(source, "Файл пустой или не содержит заголовков.")
+            return self._fail_report(source, "Источник пустой или не содержит заголовков.")
         except Exception as exc:
-            return self._fail_report(source, f"Файл не читается или не проверяется: {exc}")
+            return self._fail_report(source, f"Источник не читается или не проверяется: {exc}")
+
+    def _run_checks(self, source: QualityDataSource, prepared: Any, con: Any) -> dict[str, Any]:
+        if prepared.total_rows == 0:
+            return self._fail_report(source, "В источнике данных 0 строк.", total_rows=0)
+
+        skipped: list[SkippedCheck] = []
+        ctx = QualityContext(con=con, config=self.config, prepared=prepared, skipped_checks=skipped)
+        issues: list[QualityIssue] = []
+        for check in CHECKS:
+            issues.extend(check(ctx))
+        return self._report(source=source, total_rows=prepared.total_rows, issues=issues, skipped=skipped, columns=prepared.columns)
 
     def _report(
         self,
@@ -80,7 +95,7 @@ class DataQualityRunner:
         status = "WARNING" if has_problem else "OK"
         warning_messages: list[str] = []
         if source.fallback_used:
-            warning_messages.append("Classified CSV не найден, используется merged CSV.")
+            warning_messages.append("Куб DuckDB не найден, используется legacy CSV fallback.")
         if severity["CRITICAL"]:
             warning_messages.append(f"Найдены CRITICAL-предупреждения: {severity['CRITICAL']}.")
         if severity["WARNING"]:
@@ -184,6 +199,9 @@ class DataQualityRunner:
             "paths": [str(path) for path in source.paths[:10]],
             "file_count": source.file_count,
             "fallback_used": source.fallback_used,
+            "table_name": source.table_name,
+            "row_count": source.row_count,
+            "slice_count": source.slice_count,
         }
 
 

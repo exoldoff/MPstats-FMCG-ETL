@@ -2290,28 +2290,28 @@ class WebApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             seed_project(root)
-            unit_processed = root / "data" / "projects" / "unit" / "processed"
-            merged_only_dir = root / "data" / "projects" / "merged_only" / "merged"
-            unit_processed.mkdir(parents=True, exist_ok=True)
-            merged_only_dir.mkdir(parents=True, exist_ok=True)
-            write_semicolon_csv(
-                pd.DataFrame(
-                    [
-                        {"Название": "Лимон 1 кг", "Маркетплейс": "Ozon", "Категория": "Кислота", "SKU": "sku-1", "Вес, кг": 1.0, "Подкатегория": "Лимонная"},
-                        {"Название": "Лимон 2 кг", "Маркетплейс": "WB", "Категория": "Кислота", "SKU": "sku-2", "Вес, кг": 2.0, "Подкатегория": "Лимонная"},
-                    ]
-                ),
-                unit_processed / "unit_classified.csv",
-            )
-            write_semicolon_csv(
-                pd.DataFrame(
-                    [
-                        {"Название": "Мыло 1 кг", "Маркетплейс": "Ozon", "Категория": "Мыло", "SKU": "soap-1", "Вес, кг": 1.0},
-                    ]
-                ),
-                merged_only_dir / "merged_only.csv",
-            )
             settings = make_settings(root)
+            repository = DuckDbAppRepository(settings)
+            cube_file = root / "quality_cube.csv"
+            write_semicolon_csv(
+                pd.DataFrame(
+                    [
+                        {"Дата": "01.01.2025", "Название": "Лимон 1 кг", "Маркетплейс": "Ozon", "Категория": "Кислота", "SKU": "sku-1", "Продажи, шт": 10, "Средняя цена, руб": 10, "Выручка, руб": 100, "Объем, кг": 1.0},
+                        {"Дата": "01.01.2025", "Название": "Лимон 2 кг", "Маркетплейс": "Ozon", "Категория": "Кислота", "SKU": "sku-2", "Продажи, шт": 12, "Средняя цена, руб": 10, "Выручка, руб": 120, "Объем, кг": 1.0},
+                    ]
+                ),
+                cube_file,
+            )
+            repository.import_products_file_idempotent(
+                run_id="quality-run",
+                csv_path=cube_file,
+                table_name=settings.products_table,
+                project_name="unit",
+                year=2025,
+                month=1,
+                marketplace_code="oz",
+                category_key="acid",
+            )
             app = create_app(settings, start_workers=False)
 
             with TestClient(app) as client:
@@ -2319,15 +2319,16 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(projects.status_code, 200)
                 rows = projects.json()["projects"]
                 by_name = {row["project_name"]: row for row in rows}
-                self.assertEqual(by_name["unit"]["source_kind"], "classified")
-                self.assertTrue(by_name["merged_only"]["fallback_used"])
+                self.assertEqual(by_name["unit"]["source_kind"], "cube")
+                self.assertEqual(by_name["unit"]["row_count"], 2)
 
                 report = client.get("/api/quality/report", params={"project_name": "unit"})
                 self.assertEqual(report.status_code, 200)
                 payload = report.json()
                 self.assertEqual(payload["status"], "OK")
                 self.assertEqual(payload["total_rows"], 2)
-                self.assertEqual(payload["source"]["kind"], "classified")
+                self.assertEqual(payload["source"]["kind"], "cube")
+                self.assertEqual(payload["source"]["table_name"], settings.products_table)
 
                 missing = client.get("/api/quality/report", params={"project_name": "missing"})
                 self.assertEqual(missing.status_code, 404)

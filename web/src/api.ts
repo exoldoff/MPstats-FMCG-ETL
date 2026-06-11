@@ -238,12 +238,15 @@ export type QualityStatus = "OK" | "WARNING" | "FAIL";
 
 export type QualityProject = {
   project_name: string;
-  source_kind: "classified" | "merged" | string;
-  source_scope: "legacy" | "project_files" | string;
+  source_kind: "cube" | "classified" | "merged" | string;
+  source_scope: "duckdb" | "legacy" | "project_files" | string;
   file_count: number;
   path: string;
   paths: string[];
   fallback_used: boolean;
+  table_name?: string | null;
+  row_count?: number;
+  slice_count?: number;
   updated_at?: string | null;
 };
 
@@ -283,12 +286,15 @@ export type QualityReport = {
   status: QualityStatus;
   status_comment: string;
   source: {
-    kind: "classified" | "merged" | string;
-    scope: "legacy" | "project_files" | string;
+    kind: "cube" | "classified" | "merged" | string;
+    scope: "duckdb" | "legacy" | "project_files" | string;
     path: string;
     paths: string[];
     file_count: number;
     fallback_used: boolean;
+    table_name?: string | null;
+    row_count?: number;
+    slice_count?: number;
   };
   total_rows: number;
   metrics: {

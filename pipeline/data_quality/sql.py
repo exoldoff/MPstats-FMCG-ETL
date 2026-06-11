@@ -7,14 +7,19 @@ import re
 import duckdb
 
 from pipeline.data_quality.models import PreparedQualityData
-from pipeline.repositories.sql_repository import sql_literal
+from pipeline.repositories.sql_repository import quote_identifier, sql_literal
 
 
 CANONICAL_COLUMNS: dict[str, tuple[str, ...]] = {
     "date": ("Дата", "date", "Дата отчета", "Период", "period"),
+    "year": ("__year", "Год", "year"),
+    "month": ("__month", "Месяц", "month"),
+    "project": ("__project_name", "project_name"),
     "marketplace": ("Маркетплейс", "Marketplace", "МП", "marketplace"),
+    "marketplace_code": ("__marketplace_code", "marketplace_code"),
     "network": ("Сеть", "network", "Network", "retailer", "Ритейлер"),
     "category": ("Категория", "Category", "category", "category_name"),
+    "category_key": ("__category_key", "category_key"),
     "subcategory": ("Подкатегория", "Subcategory", "subcategory"),
     "sku": ("SKU", "Артикул", "ID товара", "id товара", "nmId", "nm_id", "product_id", "offer_id"),
     "brand": ("Бренд", "Brand", "brand"),
@@ -37,7 +42,7 @@ class SqlCheckRow:
 
 def prepare_quality_tables(con: duckdb.DuckDBPyConnection, paths: tuple[Path, ...]) -> PreparedQualityData:
     if not paths:
-        raise FileNotFoundError("Итоговый CSV для проверки качества не найден.")
+        raise FileNotFoundError("Источник для проверки качества не найден.")
 
     con.execute("SET preserve_insertion_order = false")
     con.execute(
@@ -55,10 +60,56 @@ def prepare_quality_tables(con: duckdb.DuckDBPyConnection, paths: tuple[Path, ..
     )
     raw_columns = [str(row[0]) for row in con.execute("DESCRIBE dq_raw").fetchall()]
     columns = _resolve_columns(raw_columns)
+    _create_prepared_tables(con, columns)
+    total_rows = int(con.execute("SELECT COUNT(*) FROM dq_base").fetchone()[0])
+    latest = con.execute("SELECT MAX(period) FROM dq_base WHERE period IS NOT NULL").fetchone()
+    latest_period = str(latest[0]) if latest and latest[0] is not None else None
+    return PreparedQualityData(
+        total_rows=total_rows,
+        columns=columns,
+        raw_columns=raw_columns,
+        latest_period=latest_period,
+        source_paths=paths,
+    )
 
-    date_value = _date_expr(columns.get("date"))
+
+def prepare_quality_tables_from_cube(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+    project_name: str,
+    db_path: Path,
+) -> PreparedQualityData:
+    quote_identifier(table_name)
+    con.execute("SET preserve_insertion_order = false")
+    con.execute(
+        f"""
+        CREATE TEMP VIEW dq_raw AS
+        SELECT *
+        FROM {quote_identifier(table_name)}
+        WHERE {_quote('__project_name')} = {sql_literal(project_name)}
+        """
+    )
+    raw_columns = [str(row[0]) for row in con.execute("DESCRIBE dq_raw").fetchall()]
+    columns = _resolve_columns(raw_columns)
+    _create_prepared_tables(con, columns)
+    total_rows = int(con.execute("SELECT COUNT(*) FROM dq_base").fetchone()[0])
+    latest = con.execute("SELECT MAX(period) FROM dq_base WHERE period IS NOT NULL").fetchone()
+    latest_period = str(latest[0]) if latest and latest[0] is not None else None
+    return PreparedQualityData(
+        total_rows=total_rows,
+        columns=columns,
+        raw_columns=raw_columns,
+        latest_period=latest_period,
+        source_paths=(db_path,),
+    )
+
+
+def _create_prepared_tables(con: duckdb.DuckDBPyConnection, columns: dict[str, str | None]) -> None:
+    date_value = _date_expr(columns.get("date"), columns.get("year"), columns.get("month"))
     period_expr = f"STRFTIME(DATE_TRUNC('month', {date_value}), '%Y-%m')"
-    network_expr = _coalesce_text_expr(columns.get("network"), columns.get("marketplace"))
+    category_expr = _coalesce_text_expr(columns.get("category"), columns.get("category_key"))
+    network_expr = _coalesce_text_expr(columns.get("network"), columns.get("marketplace"), columns.get("marketplace_code"))
     source_expr = _text_expr(columns.get("source_file"))
 
     con.execute(
@@ -70,7 +121,7 @@ def prepare_quality_tables(con: duckdb.DuckDBPyConnection, paths: tuple[Path, ..
             {date_value} AS date_value,
             {period_expr} AS period,
             DATE_TRUNC('month', {date_value})::DATE AS period_date,
-            {_text_expr(columns.get("category"))} AS category,
+            {category_expr} AS category,
             {_sku_expr(columns.get("sku"))} AS sku,
             {_text_expr(columns.get("brand"))} AS brand,
             {network_expr} AS network,
@@ -177,16 +228,6 @@ def prepare_quality_tables(con: duckdb.DuckDBPyConnection, paths: tuple[Path, ..
         GROUP BY period, period_date, category, network
         """
     )
-    total_rows = int(con.execute("SELECT COUNT(*) FROM dq_base").fetchone()[0])
-    latest = con.execute("SELECT MAX(period) FROM dq_base WHERE period IS NOT NULL").fetchone()
-    latest_period = str(latest[0]) if latest and latest[0] is not None else None
-    return PreparedQualityData(
-        total_rows=total_rows,
-        columns=columns,
-        raw_columns=raw_columns,
-        latest_period=latest_period,
-        source_paths=paths,
-    )
 
 
 def fetch_dicts(con: duckdb.DuckDBPyConnection, sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
@@ -240,8 +281,12 @@ def _numeric_expr(column: str | None) -> str:
     return f"TRY_CAST({clean} AS DOUBLE)"
 
 
-def _date_expr(column: str | None) -> str:
+def _date_expr(column: str | None, year_column: str | None = None, month_column: str | None = None) -> str:
     if not column:
+        if year_column and month_column:
+            year_expr = _numeric_expr(year_column)
+            month_expr = _numeric_expr(month_column)
+            return f"MAKE_DATE(TRY_CAST({year_expr} AS INTEGER), TRY_CAST({month_expr} AS INTEGER), 1)"
         return "NULL::DATE"
     text = _text_expr(column)
     return (

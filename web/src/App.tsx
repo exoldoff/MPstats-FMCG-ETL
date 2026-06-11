@@ -3675,7 +3675,7 @@ function QualityReportView(props: { report: QualityReport }) {
         <div>
           <QualityStatusBadge status={report.status} />
           <h3>{report.status_comment}</h3>
-          <span>{qualitySourceLabel(report.source.kind, report.source.fallback_used)} · {formatNumber(report.source.file_count)} файл(ов)</span>
+          <span>{qualitySourceLabel(report.source.kind, report.source.fallback_used)} · {qualitySourceMeta(report.source)}</span>
         </div>
         <code title={report.source.path}>{report.source.path}</code>
       </div>
@@ -3801,10 +3801,19 @@ function formatQualityValue(value: number | string | null | undefined) {
 }
 
 function qualitySourceLabel(kind: string, fallbackUsed: boolean) {
-  if (kind === "classified") return "использован classified CSV";
-  if (fallbackUsed) return "classified не найден, использован merged CSV";
+  if (kind === "cube") return "использован куб DuckDB";
+  if (kind === "classified") return "legacy fallback: classified CSV";
+  if (fallbackUsed) return "куб не найден, использован legacy CSV";
   if (kind === "merged") return "использован merged CSV";
   return kind;
+}
+
+function qualitySourceMeta(source: QualityReport["source"]) {
+  if (source.kind === "cube") {
+    const slices = Number(source.slice_count || 0);
+    return `${formatNumber(source.row_count)} строк${slices ? ` · ${formatNumber(slices)} срезов` : ""}`;
+  }
+  return `${formatNumber(source.file_count)} файл(ов)`;
 }
 
 function formatNumber(value: number | null | undefined) {

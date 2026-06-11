@@ -59,7 +59,12 @@ def create_app(settings: AppSettings | None = None, *, start_workers: bool = Tru
     job_service = JobService(settings=app_settings, repository=repository)
     scheduler_service = SchedulerService(settings=app_settings, repository=repository, job_service=job_service)
     data_quality_service = DataQualityService(
-        DataQualityRepository(project_root=app_settings.project_root, workdir=app_settings.workdir)
+        DataQualityRepository(
+            project_root=app_settings.project_root,
+            workdir=app_settings.workdir,
+            db_path=app_settings.db_path,
+            products_table=app_settings.products_table,
+        )
     )
 
     @asynccontextmanager
