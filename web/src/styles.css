@@ -2481,6 +2481,7 @@ a.ghost-button {
 .quality-panel,
 .quality-report,
 .quality-section,
+.quality-summary-block,
 .quality-examples {
   display: grid;
   align-content: start;
@@ -2639,6 +2640,49 @@ a.ghost-button {
 
 .quality-section h3 {
   font-size: 15px;
+}
+
+.quality-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.quality-summary-block {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #d8e1e4;
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.quality-summary-block > strong {
+  font-size: 13px;
+}
+
+.quality-issue-severity {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.quality-issue-severity.critical {
+  color: #8b2727;
+  background: #f8dada;
+}
+
+.quality-issue-severity.warning {
+  color: #6d4a11;
+  background: #ffe8a9;
+}
+
+.quality-issue-severity.info {
+  color: #24556d;
+  background: #dff0f8;
 }
 
 .quality-examples details {

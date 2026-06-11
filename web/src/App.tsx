@@ -59,7 +59,7 @@ import {
   ProductSearch,
   ProjectSummary,
   ProjectFile,
-  QualityProblem,
+  QualityIssue,
   QualityProject,
   QualityReport,
   ReportArtifact,
@@ -3666,6 +3666,9 @@ function DataQualityWorkspace(props: {
 
 function QualityReportView(props: { report: QualityReport }) {
   const report = props.report;
+  const severity = report.metrics.summary_by_severity ?? { CRITICAL: 0, WARNING: 0, INFO: 0, total: report.issues?.length ?? 0 };
+  const issues = report.issues ?? [];
+  const businessChanges = report.business_changes ?? [];
   return (
     <div className="quality-report">
       <div className={`quality-status-card ${report.status.toLowerCase()}`}>
@@ -3685,15 +3688,11 @@ function QualityReportView(props: { report: QualityReport }) {
 
       <div className="quality-metrics">
         <QualityMetric label="Строк всего" value={formatNumber(report.total_rows)} />
-        <QualityMetric label="Вес/объём найден" value={formatPercent(report.metrics.weight_volume.coverage_share)} detail={`${formatNumber(report.metrics.weight_volume.parsed_count)} строк`} />
-        <QualityMetric label="Классифицировано" value={formatPercent(report.metrics.classification.coverage_share)} detail={`${formatNumber(report.metrics.classification.classified_count)} строк`} />
-        <QualityMetric label="Аномалии" value={formatNumber(report.metrics.anomalies.count)} detail="вес/объём" />
-        <QualityMetric
-          label="Дубли"
-          value={report.metrics.duplicates.checked ? formatNumber(report.metrics.duplicates.duplicate_rows) : "пропущено"}
-          detail={report.metrics.duplicates.checked ? "полная строка" : "нет колонок"}
-        />
-        <QualityMetric label="Пустые поля" value={formatNumber(report.metrics.empty_key_fields.rows_with_empty)} detail="ключевые поля" />
+        <QualityMetric label="CRITICAL" value={formatNumber(severity.CRITICAL)} detail="опасные артефакты" />
+        <QualityMetric label="WARNING" value={formatNumber(severity.WARNING)} detail="нужно проверить" />
+        <QualityMetric label="INFO" value={formatNumber(severity.INFO)} detail="бизнес-изменения" />
+        <QualityMetric label="Проверки" value={formatNumber(severity.total)} detail="сработавшие правила" />
+        <QualityMetric label="Lifecycle" value={formatNumber(businessChanges.length)} detail="новые/исчезнувшие SKU" />
       </div>
 
       {report.skipped_checks.length ? (
@@ -3706,13 +3705,21 @@ function QualityReportView(props: { report: QualityReport }) {
       ) : null}
 
       <div className="quality-section">
-        <h3>Проблемы</h3>
-        {report.problems.length ? <QualityProblemsTable problems={report.problems} /> : <Empty text="Проблемы не найдены." />}
+        <h3>Сводка</h3>
+        <div className="quality-summary-grid">
+          <QualitySummaryBlock title="Топ SKU" rows={report.metrics.top_suspicious_skus ?? []} />
+          <QualitySummaryBlock title="Категории" rows={report.metrics.top_problem_categories ?? []} />
+        </div>
       </div>
 
       <div className="quality-section">
-        <h3>Примеры строк для проверки</h3>
-        <QualityExamples report={report} />
+        <h3>Предупреждения</h3>
+        {issues.length ? <QualityIssuesTable issues={issues} /> : <Empty text="Подозрительные бизнес-аномалии не найдены." />}
+      </div>
+
+      <div className="quality-section">
+        <h3>Бизнес-изменения</h3>
+        {businessChanges.length ? <QualityIssuesTable issues={businessChanges} compact /> : <Empty text="Новых, исчезнувших или вернувшихся значимых SKU не найдено." />}
       </div>
     </div>
   );
@@ -3734,53 +3741,63 @@ function QualityStatusBadge(props: { status: QualityReport["status"] }) {
   return <span className={`quality-status-badge ${props.status.toLowerCase()}`}>{icon}{label}</span>;
 }
 
-function QualityProblemsTable(props: { problems: QualityProblem[] }) {
+function QualityIssuesTable(props: { issues: QualityIssue[]; compact?: boolean }) {
   return (
     <FilterableTable
-      rows={props.problems}
-      rowKey={(problem, index) => `${problem.type}-${index}`}
-      emptyText="Проблемы не найдены."
+      rows={props.issues}
+      rowKey={(item, index) => `${item.check_id}-${item.entity_type}-${item.entity_id}-${item.period ?? ""}-${index}`}
+      emptyText="Предупреждения не найдены."
       columns={[
-        { id: "type", label: "Тип проблемы", value: (problem) => problem.type },
-        { id: "count", label: "Строк", value: (problem) => problem.count, render: (problem) => formatNumber(problem.count), numeric: true },
-        { id: "share", label: "Доля", value: (problem) => problem.share, render: (problem) => formatPercent(problem.share), numeric: true },
-        { id: "comment", label: "Комментарий", value: (problem) => problem.comment, title: (problem) => problem.comment }
+        {
+          id: "severity",
+          label: "Важность",
+          value: (item) => item.severity,
+          render: (item) => <span className={`quality-issue-severity ${item.severity.toLowerCase()}`}>{item.severity}</span>
+        },
+        { id: "check", label: "Проверка", value: (item) => item.check_name, title: (item) => item.check_name },
+        { id: "entity", label: "Объект", value: (item) => `${item.entity_type}: ${item.entity_id}`, title: (item) => `${item.entity_type}: ${item.entity_id}` },
+        { id: "category", label: "Категория", value: (item) => item.category ?? "" },
+        { id: "period", label: "Период", value: (item) => item.period ?? "" },
+        ...(props.compact ? [] : [
+          { id: "metric", label: "Метрика", value: (item: QualityIssue) => item.metric_name },
+          { id: "current", label: "Текущее", value: (item: QualityIssue) => item.current_value ?? "", render: (item: QualityIssue) => formatQualityValue(item.current_value), numeric: true },
+          { id: "baseline", label: "База", value: (item: QualityIssue) => item.baseline_value ?? "", render: (item: QualityIssue) => formatQualityValue(item.baseline_value), numeric: true }
+        ]),
+        { id: "message", label: "Почему сработало", value: (item) => item.message, title: (item) => qualityIssueTitle(item) },
+        { id: "action", label: "Что сделать", value: (item) => item.suggested_action, title: (item) => item.suggested_action }
       ]}
     />
   );
 }
 
-function QualityExamples(props: { report: QualityReport }) {
-  const groups = [
-    { id: "unclassified", title: "Неклассифицированные товары", rows: props.report.examples.unclassified },
-    { id: "missing-weight", title: "Товары без веса/объёма", rows: props.report.examples.missing_weight_volume },
-    { id: "anomalies", title: "Аномальный вес/объём", rows: props.report.examples.anomalies },
-    { id: "duplicates", title: "Полные дубли строк", rows: props.report.examples.duplicates }
-  ];
+function QualitySummaryBlock(props: { title: string; rows: Array<Record<string, unknown>> }) {
   return (
-    <div className="quality-examples">
-      {groups.map((group) => (
-        <details key={group.id} open={group.rows.length > 0}>
-          <summary>
-            <span>{group.title}</span>
-            <strong>{formatNumber(group.rows.length)}</strong>
-          </summary>
-          {group.rows.length ? <SimpleTable columns={qualityExampleColumns(group.rows)} rows={group.rows} /> : <Empty text="Нет примеров." />}
-        </details>
-      ))}
+    <div className="quality-summary-block">
+      <strong>{props.title}</strong>
+      {props.rows.length ? <SimpleTable columns={qualitySummaryColumns(props.rows)} rows={props.rows} /> : <Empty text="Нет данных." />}
     </div>
   );
 }
 
-function qualityExampleColumns(rows: Record<string, unknown>[]) {
-  const columns: string[] = [];
-  for (const row of rows) {
-    for (const column of Object.keys(row)) {
-      if (!columns.includes(column)) columns.push(column);
-      if (columns.length >= 8) return columns;
-    }
+function qualitySummaryColumns(rows: Array<Record<string, unknown>>) {
+  const priority = ["sku", "key", "category", "issues", "total", "critical", "warning", "info", "max_relative_delta"];
+  const available = new Set(rows.flatMap((row) => Object.keys(row)));
+  return priority.filter((column) => available.has(column)).slice(0, 8);
+}
+
+function qualityIssueTitle(issue: QualityIssue) {
+  const details = Object.keys(issue.details || {}).length ? `\nДетали: ${JSON.stringify(issue.details)}` : "";
+  return `${issue.message}${details}`;
+}
+
+function formatQualityValue(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "number") {
+    const absolute = Math.abs(value);
+    if (absolute > 0 && absolute < 1) return String(Math.round(value * 10000) / 10000);
+    return formatNumber(Math.round(value * 100) / 100);
   }
-  return columns;
+  return String(value);
 }
 
 function qualitySourceLabel(kind: string, fallbackUsed: boolean) {
@@ -3788,10 +3805,6 @@ function qualitySourceLabel(kind: string, fallbackUsed: boolean) {
   if (fallbackUsed) return "classified не найден, использован merged CSV";
   if (kind === "merged") return "использован merged CSV";
   return kind;
-}
-
-function formatPercent(value: number | null | undefined) {
-  return `${Math.round(Number(value || 0) * 1000) / 10}%`;
 }
 
 function formatNumber(value: number | null | undefined) {

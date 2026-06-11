@@ -33,6 +33,7 @@
 | Категории | `Справочник категорий MP STATS.csv`, `filter.md`, `.cursor/agents/mpstats-tasks-handbook.md`, `справочник tasks архив.md` | Добавление или синхронизация TASKS |
 | Классификация | `classifiers/rules.csv`, `classifiers/engine.py`, `mpstats_app/services/classifier_rules_service.py` | Правила web-редактора и движок классификатора |
 | Сервисы шагов | `pipeline/services/` | Внутренняя бизнес-логика, вызываемая web-app |
+| Качество данных | `pipeline/data_quality/`, `pipeline/services/data_quality_service.py`, `mpstats_app/api/quality.py` | Бизнес-проверки MPStats: продажи, ТО, цены, доли, дубли, периоды, согласованность метрик |
 | Файловый слой | `pipeline/repositories/` | Чтение/запись CSV/JSON |
 | SQL-хранилище | `pipeline/repositories/sql_repository.py`, `pipeline/migrations/`, `mpstats_app/repositories/duckdb_repository.py` | DuckDB-хранилище web-app |
 | Web API | `mpstats_app/api/`, `mpstats_app/schemas.py`, `tests/test_web_api.py` | Backend routes, схемы, API-регрессии |
@@ -100,13 +101,14 @@ python3 -m pytest tests/test_web_api.py
 - Сервисы шагов 1-6 в `pipeline/services/`.
 - Data layer в `pipeline/repositories/` и DuckDB-миграции в `pipeline/migrations/`.
 - Локальная FastAPI + React web-app с редактором справочника и классификатора.
+- MVP проверки качества данных в `pipeline/data_quality/` и вкладке `Данные` -> `Качество`.
 - Regression tests для pipeline services, SQL, web API и парсера веса.
 
 ## Чего не хватает
 
 - CI для автоматического запуска тестов.
 - Browser/e2e-регрессий frontend.
-- Регулярного отчёта качества данных: аномальные веса, пустые классификации, причины отбрасывания строк.
+- Полной настройки порогов качества данных по проектам/категориям через web UI.
 - Полной уборки исторических выгрузок, логов и локальных DB-артефактов из tracked-части репозитория.
 - Отдельной API-reference для backend; пока ориентируйся на `mpstats_app/api/`, `mpstats_app/schemas.py` и `tests/test_web_api.py`.
 

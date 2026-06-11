@@ -254,6 +254,25 @@ export type QualityProblem = {
   comment: string;
 };
 
+export type QualityIssue = {
+  check_id: string;
+  check_name: string;
+  severity: "CRITICAL" | "WARNING" | "INFO";
+  entity_type: "sku" | "brand" | "category" | "period" | "network" | "row" | "dataset" | string;
+  entity_id: string;
+  category?: string | null;
+  period?: string | null;
+  metric_name: string;
+  current_value?: number | string | null;
+  previous_value?: number | string | null;
+  baseline_value?: number | string | null;
+  absolute_delta?: number | null;
+  relative_delta?: number | null;
+  message: string;
+  details: Record<string, unknown>;
+  suggested_action: string;
+};
+
 export type QualitySkippedCheck = {
   check: string;
   reason: string;
@@ -273,6 +292,14 @@ export type QualityReport = {
   };
   total_rows: number;
   metrics: {
+    summary_by_severity?: { CRITICAL: number; WARNING: number; INFO: number; total: number };
+    summary_by_category?: Array<Record<string, unknown>>;
+    summary_by_period?: Array<Record<string, unknown>>;
+    summary_by_check?: Array<Record<string, unknown>>;
+    top_suspicious_skus?: Array<Record<string, unknown>>;
+    top_problem_categories?: Array<Record<string, unknown>>;
+    detected_columns?: Record<string, string>;
+    checks?: Record<string, number>;
     empty_key_fields: { rows_with_empty: number; share: number; fields: Array<Record<string, unknown>> };
     weight_volume: { columns: string[]; parsed_count: number; missing_count: number; coverage_share: number; missing_share: number };
     anomalies: { columns: string[]; count: number; zero_or_negative: number; too_large: number; suspicious: number };
@@ -287,6 +314,10 @@ export type QualityReport = {
     anomalies: Record<string, unknown>[];
     duplicates: Record<string, unknown>[];
   };
+  issues?: QualityIssue[];
+  critical_issues?: QualityIssue[];
+  warning_issues?: QualityIssue[];
+  business_changes?: QualityIssue[];
   warnings: string[];
   summary: string;
 };
