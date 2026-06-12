@@ -238,7 +238,7 @@ class SmartPipelineService:
         )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        run = self.repository.refresh_pipeline_run_counts(run_id) or self.repository.get_pipeline_run(run_id)
+        run = self.repository.get_pipeline_run(run_id)
         if not run:
             raise KeyError(f"Запуск не найден: {run_id}")
         tasks = self.repository.list_download_tasks(run_id=run_id)
@@ -365,9 +365,10 @@ class SmartPipelineService:
             else:
                 self._operation_progress.pop(run_id, None)
             if not wait:
+                initial_step = self._operation_initial_step(operation_kind)
                 self.repository.update_pipeline_run(
                     run_id,
-                    {"status": "running", "current_step": "Старт", "started_at": datetime.now(), "finished_at": None},
+                    {"status": "running", "current_step": initial_step, "started_at": datetime.now(), "finished_at": None},
                 )
                 thread = Thread(
                     target=self._run,
@@ -476,6 +477,16 @@ class SmartPipelineService:
             return "rebuild"
         return None
 
+    @staticmethod
+    def _operation_initial_step(operation_kind: str | None) -> str:
+        if operation_kind == "reprocess":
+            return "Проверка raw-файлов"
+        if operation_kind == "reclassify":
+            return "Проверка processed-файлов"
+        if operation_kind == "rebuild":
+            return "Проверка classified-файлов"
+        return "Старт"
+
     def _begin_operation_progress(self, run_id: str, *, kind: str, tasks: list[dict[str, Any]]) -> None:
         with self._lock:
             self._operation_progress[run_id] = {
@@ -530,27 +541,32 @@ class SmartPipelineService:
         force_reprocess: bool = False,
         force_db_overwrite: bool = False,
     ) -> None:
-        run = self.repository.get_pipeline_run(run_id)
-        if not run:
-            return
         operation_kind = self._operation_kind(
             rebuild_only=rebuild_only,
             force_reclassify=force_reclassify,
             force_reprocess=force_reprocess,
         )
-        settings = {**self.get_pipeline_settings(), **self._json_dict(run.get("settings_json"))}
-        if force_reclassify or force_reprocess:
-            settings["overwrite_processed"] = True
-        if force_db_overwrite:
-            settings["overwrite_db"] = True
-        self.repository.update_pipeline_run(
-            run_id,
-            {"status": "running", "current_step": "Старт", "started_at": datetime.now(), "finished_at": None},
-        )
-        tasks = self._operation_tasks(run_id=run_id, task_filter=task_filter, task_ids=task_ids)
-        if operation_kind:
-            self._begin_operation_progress(run_id, kind=operation_kind, tasks=tasks)
         try:
+            run = self.repository.get_pipeline_run(run_id)
+            if not run:
+                return
+            settings = {**self.get_pipeline_settings(), **self._json_dict(run.get("settings_json"))}
+            if force_reclassify or force_reprocess:
+                settings["overwrite_processed"] = True
+            if force_db_overwrite:
+                settings["overwrite_db"] = True
+            self.repository.update_pipeline_run(
+                run_id,
+                {
+                    "status": "running",
+                    "current_step": self._operation_initial_step(operation_kind),
+                    "started_at": datetime.now(),
+                    "finished_at": None,
+                },
+            )
+            tasks = self._operation_tasks(run_id=run_id, task_filter=task_filter, task_ids=task_ids)
+            if operation_kind:
+                self._begin_operation_progress(run_id, kind=operation_kind, tasks=tasks)
             for task in tasks:
                 self._check_control(run_id)
                 if str(task["status"]) in FINAL_STATUSES and not settings.get("overwrite_db"):
