@@ -2439,6 +2439,73 @@ class WebApiTest(unittest.TestCase):
                 runs = client.get("/api/workflow/pipeline/runs", params={"project_name": "unit"}).json()["runs"]
                 self.assertNotIn(run_id, {row["id"] for row in runs})
 
+    def test_bulk_delete_cube_entries_removes_registry_and_products(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+            repository = DuckDbAppRepository(settings)
+
+            for index, category_key in enumerate(("bulk-a", "bulk-b"), start=1):
+                csv_path = root / f"bulk-{index}.csv"
+                write_semicolon_csv(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Маркетплейс": "Ozon",
+                                "Категория": f"Bulk {index}",
+                                "Артикул": f"bulk-{index}",
+                                "SKU": f"bulk-delete-{index}",
+                                "Бренд": "brand",
+                                "Продажи, шт": 5,
+                                "Объем, кг": 1,
+                            }
+                        ]
+                    ),
+                    csv_path,
+                )
+                inserted = repository.import_products_file_idempotent(
+                    run_id=f"bulk-run-{index}",
+                    csv_path=csv_path,
+                    table_name=settings.products_table,
+                    project_name="unit",
+                    year=2025,
+                    month=index,
+                    marketplace_code="oz",
+                    category_key=category_key,
+                    category_name=f"Bulk {index}",
+                )
+                repository.upsert_cube_entry(
+                    {
+                        "project_name": "unit",
+                        "year": 2025,
+                        "month": index,
+                        "marketplace": "Ozon",
+                        "marketplace_code": "oz",
+                        "category_key": category_key,
+                        "category_name": f"Bulk {index}",
+                        "rows_count": inserted,
+                        "source_processed_file_path": str(csv_path),
+                        "file_hash": f"bulk-{index}",
+                    }
+                )
+
+            with TestClient(app) as client:
+                cube = client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"})
+                self.assertEqual(cube.status_code, 200)
+                entry_ids = [item["id"] for item in cube.json()["items"]]
+                self.assertEqual(len(entry_ids), 2)
+                self.assertEqual(client.get("/api/products", params={"project_name": "unit", "query": "bulk-delete"}).json()["total"], 2)
+
+                deleted = client.post("/api/workflow/pipeline/cube/bulk-delete", json={"entry_ids": entry_ids})
+                self.assertEqual(deleted.status_code, 200)
+                self.assertEqual(deleted.json()["deleted"]["cube_registry"], 2)
+                self.assertEqual(deleted.json()["deleted"]["product_rows"], 2)
+                self.assertEqual(len(deleted.json()["entries"]), 2)
+                self.assertEqual(client.get("/api/workflow/pipeline/cube", params={"project_name": "unit"}).json()["items"], [])
+                self.assertEqual(client.get("/api/products", params={"project_name": "unit", "query": "bulk-delete"}).json()["total"], 0)
+
     def test_smart_pipeline_files_classify_kinds_and_hide_merged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

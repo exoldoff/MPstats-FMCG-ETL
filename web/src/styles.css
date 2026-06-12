@@ -812,6 +812,21 @@ select {
   flex-wrap: wrap;
 }
 
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 40px;
+  margin-bottom: 10px;
+  color: #4b5f65;
+  font-size: 13px;
+}
+
+.bulk-action-bar span {
+  flex: 1 1 220px;
+}
+
 .file-kind-toolbar {
   align-items: stretch;
   gap: 8px;

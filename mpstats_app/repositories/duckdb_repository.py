@@ -1630,75 +1630,89 @@ class DuckDbAppRepository:
         )
 
     def delete_cube_entry(self, *, entry_id: str, table_name: str) -> dict[str, Any]:
+        result = self.delete_cube_entries(entry_ids=[entry_id], table_name=table_name)
+        entry = result["entries"][0] if result["entries"] else None
+        return {"entry_id": entry_id, "deleted": result["deleted"], "entry": entry}
+
+    def delete_cube_entries(self, *, entry_ids: list[str], table_name: str) -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(str(entry_id).strip() for entry_id in entry_ids if str(entry_id).strip()))
         counts: dict[str, int] = {"cube_registry": 0, "product_rows": 0, "download_tasks": 0}
         run_ids: set[str] = set()
-        deleted_entry: dict[str, Any] | None = None
+        deleted_entries: list[dict[str, Any]] = []
+        affected_categories: dict[str, set[str]] = {}
+        if not unique_ids:
+            return {"entry_ids": [], "deleted": counts, "entries": []}
+
         with self._lock, connect(self.settings.db_path) as con:
             apply_migrations(con)
-            result = con.execute("SELECT * FROM cube_registry WHERE id = ?", [entry_id])
-            columns = [col[0] for col in result.description]
-            row = result.fetchone()
-            if not row:
-                return {"entry_id": entry_id, "deleted": counts, "entry": None}
-            deleted_entry = clean_record(dict(zip(columns, row)))
-            project_name = str(deleted_entry["project_name"])
-            year = int(deleted_entry["year"])
-            month = int(deleted_entry["month"])
-            marketplace_code = str(deleted_entry["marketplace_code"])
-            category_key = str(deleted_entry["category_key"])
-
-            products_exists = bool(
-                con.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM information_schema.tables
-                    WHERE table_schema = 'main' AND table_name = ?
-                    """,
-                    [table_name],
-                ).fetchone()[0]
+            placeholders = ", ".join("?" for _ in unique_ids)
+            result = con.execute(
+                f"""
+                SELECT *
+                FROM cube_registry
+                WHERE id IN ({placeholders})
+                """,
+                unique_ids,
             )
-            if products_exists:
-                product_columns = {
-                    str(product_column[0])
-                    for product_column in con.execute(
-                        """
-                        SELECT column_name
-                        FROM information_schema.columns
-                        WHERE table_schema = 'main' AND table_name = ?
-                        """,
-                        [table_name],
-                    ).fetchall()
-                }
+            columns = [col[0] for col in result.description]
+            deleted_entries = [clean_record(dict(zip(columns, row))) for row in result.fetchall()]
+            if not deleted_entries:
+                return {"entry_ids": unique_ids, "deleted": counts, "entries": []}
+
+            con.execute("DROP TABLE IF EXISTS _cube_delete_keys")
+            con.execute(
+                f"""
+                CREATE TEMPORARY TABLE _cube_delete_keys AS
+                SELECT id, project_name, year, month, marketplace_code, category_key
+                FROM cube_registry
+                WHERE id IN ({placeholders})
+                """,
+                unique_ids,
+            )
+
+            if table_exists(con, table_name):
+                product_columns = set(_table_column_types(con, table_name))
                 required = {"__project_name", "__year", "__month", "__marketplace_code", "__category_key"}
                 if required.issubset(product_columns):
                     quoted_table = quote_identifier(table_name)
-                    where_sql = f"""
-                        {quote_duckdb_name('__project_name')} = ?
-                        AND CAST({quote_duckdb_name('__year')} AS INTEGER) = ?
-                        AND CAST({quote_duckdb_name('__month')} AS INTEGER) = ?
-                        AND {quote_duckdb_name('__marketplace_code')} = ?
-                        AND {quote_duckdb_name('__category_key')} = ?
+                    product_join_sql = f"""
+                        p.{quote_duckdb_name('__project_name')} = k.project_name
+                        AND CAST(p.{quote_duckdb_name('__year')} AS INTEGER) = k.year
+                        AND CAST(p.{quote_duckdb_name('__month')} AS INTEGER) = k.month
+                        AND p.{quote_duckdb_name('__marketplace_code')} = k.marketplace_code
+                        AND p.{quote_duckdb_name('__category_key')} = k.category_key
                     """
-                    params = [project_name, year, month, marketplace_code, category_key]
                     counts["product_rows"] = int(
-                        con.execute(f"SELECT COUNT(*) FROM {quoted_table} WHERE {where_sql}", params).fetchone()[0]
+                        con.execute(
+                            f"""
+                            SELECT COUNT(*)
+                            FROM {quoted_table} AS p
+                            JOIN _cube_delete_keys AS k ON {product_join_sql}
+                            """
+                        ).fetchone()[0]
                     )
                     if counts["product_rows"]:
-                        con.execute(f"DELETE FROM {quoted_table} WHERE {where_sql}", params)
+                        con.execute(
+                            f"""
+                            DELETE FROM {quoted_table} AS p
+                            USING _cube_delete_keys AS k
+                            WHERE {product_join_sql}
+                            """
+                        )
 
             run_ids = {
                 str(task_row[0])
                 for task_row in con.execute(
                     """
-                    SELECT DISTINCT run_id
-                    FROM download_tasks
-                    WHERE project_name = ?
-                      AND year = ?
-                      AND month = ?
-                      AND marketplace_code = ?
-                      AND category_key = ?
-                    """,
-                    [project_name, year, month, marketplace_code, category_key],
+                    SELECT DISTINCT d.run_id
+                    FROM download_tasks AS d
+                    JOIN _cube_delete_keys AS k
+                      ON d.project_name = k.project_name
+                     AND d.year = k.year
+                     AND d.month = k.month
+                     AND d.marketplace_code = k.marketplace_code
+                     AND d.category_key = k.category_key
+                    """
                 ).fetchall()
                 if task_row[0] is not None
             }
@@ -1706,19 +1720,19 @@ class DuckDbAppRepository:
                 con.execute(
                     """
                     SELECT COUNT(*)
-                    FROM download_tasks
-                    WHERE project_name = ?
-                      AND year = ?
-                      AND month = ?
-                      AND marketplace_code = ?
-                      AND category_key = ?
-                    """,
-                    [project_name, year, month, marketplace_code, category_key],
+                    FROM download_tasks AS d
+                    JOIN _cube_delete_keys AS k
+                      ON d.project_name = k.project_name
+                     AND d.year = k.year
+                     AND d.month = k.month
+                     AND d.marketplace_code = k.marketplace_code
+                     AND d.category_key = k.category_key
+                    """
                 ).fetchone()[0]
             )
             con.execute(
                 """
-                UPDATE download_tasks
+                UPDATE download_tasks AS d
                 SET
                     save_status = 'pending',
                     status = CASE
@@ -1729,25 +1743,27 @@ class DuckDbAppRepository:
                     END,
                     error_message = NULL,
                     updated_at = now()
-                WHERE project_name = ?
-                  AND year = ?
-                  AND month = ?
-                  AND marketplace_code = ?
-                  AND category_key = ?
-                """,
-                [project_name, year, month, marketplace_code, category_key],
+                FROM _cube_delete_keys AS k
+                WHERE d.project_name = k.project_name
+                  AND d.year = k.year
+                  AND d.month = k.month
+                  AND d.marketplace_code = k.marketplace_code
+                  AND d.category_key = k.category_key
+                """
             )
-            counts["cube_registry"] = int(con.execute("SELECT COUNT(*) FROM cube_registry WHERE id = ?", [entry_id]).fetchone()[0])
-            con.execute("DELETE FROM cube_registry WHERE id = ?", [entry_id])
+            counts["cube_registry"] = int(
+                con.execute("SELECT COUNT(*) FROM cube_registry WHERE id IN ({})".format(placeholders), unique_ids).fetchone()[0]
+            )
+            con.execute(f"DELETE FROM cube_registry WHERE id IN ({placeholders})", unique_ids)
+
+            for entry in deleted_entries:
+                affected_categories.setdefault(str(entry["project_name"]), set()).add(str(entry["category_key"]))
 
         for run_id in run_ids:
             self.refresh_pipeline_run_counts(run_id)
-        if deleted_entry:
-            self.refresh_large_category_flags(
-                project_name=str(deleted_entry["project_name"]),
-                category_keys=[str(deleted_entry["category_key"])],
-            )
-        return {"entry_id": entry_id, "deleted": counts, "entry": deleted_entry}
+        for project_name, category_keys in affected_categories.items():
+            self.refresh_large_category_flags(project_name=project_name, category_keys=sorted(category_keys))
+        return {"entry_ids": unique_ids, "deleted": counts, "entries": deleted_entries}
 
     def mark_project_file_deleted(self, *, project_name: str, file_path: str, file_kind: str) -> dict[str, int]:
         if file_kind not in {"raw", "processed", "classified"}:

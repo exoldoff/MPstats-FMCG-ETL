@@ -362,6 +362,12 @@ export type CubeDeleteResponse = {
   entry?: CubeItem | null;
 };
 
+export type CubeBulkDeleteResponse = {
+  entry_ids: string[];
+  deleted: Record<string, number>;
+  entries: CubeItem[];
+};
+
 export type ProjectFileDeleteResponse = {
   project_name: string;
   path: string;
@@ -742,6 +748,11 @@ export const api = {
   listCube: (projectName: string) => request<CubeResponse>(`/api/workflow/pipeline/cube?project_name=${encodeURIComponent(projectName)}`),
   deleteCubeEntry: (entryId: string) =>
     request<CubeDeleteResponse>(`/api/workflow/pipeline/cube/${encodeURIComponent(entryId)}`, { method: "DELETE" }),
+  deleteCubeEntries: (entryIds: string[]) =>
+    request<CubeBulkDeleteResponse>("/api/workflow/pipeline/cube/bulk-delete", {
+      method: "POST",
+      body: JSON.stringify({ entry_ids: entryIds })
+    }),
   listQualityProjects: () => request<{ projects: QualityProject[] }>("/api/quality/projects"),
   getQualityReport: (projectName: string) => request<QualityReport>(`/api/quality/report?project_name=${encodeURIComponent(projectName)}`),
   getRules: () => request<{ path: string; content: string }>("/api/rules"),

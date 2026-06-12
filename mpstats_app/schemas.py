@@ -90,6 +90,10 @@ class ManualOverridesPayload(BaseModel):
     overrides: list[ManualOverridePayload]
 
 
+class CubeBulkDeletePayload(BaseModel):
+    entry_ids: list[str] = Field(default_factory=list, min_length=1)
+
+
 class CategorySourceRowPayload(BaseModel):
     id: str | None = None
     active: bool = True

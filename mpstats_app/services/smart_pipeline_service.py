@@ -333,6 +333,12 @@ class SmartPipelineService:
             raise KeyError(f"Срез куба не найден: {entry_id}")
         return self.repository.delete_cube_entry(entry_id=entry_id, table_name=self.settings.products_table)
 
+    def delete_cube_entries(self, *, entry_ids: list[str]) -> dict[str, Any]:
+        cleaned_ids = [str(entry_id).strip() for entry_id in entry_ids if str(entry_id).strip()]
+        if not cleaned_ids:
+            raise ValueError("Выбери хотя бы один срез куба.")
+        return self.repository.delete_cube_entries(entry_ids=cleaned_ids, table_name=self.settings.products_table)
+
     def start_run(
         self,
         *,

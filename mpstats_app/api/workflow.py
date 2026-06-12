@@ -14,6 +14,7 @@ from mpstats_app.schemas import (
     AppSettingsPayload,
     CategorySourcePayload,
     ClassifyPayload,
+    CubeBulkDeletePayload,
     DownloadPayload,
     MonthlySyncPayload,
     PipelineActionPayload,
@@ -371,6 +372,14 @@ def list_pipeline_cube(
     pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
 ) -> dict[str, object]:
     return _handle(lambda: pipeline.list_cube(project_name=project_name))
+
+
+@router.post("/pipeline/cube/bulk-delete")
+def delete_pipeline_cube_entries(
+    payload: CubeBulkDeletePayload,
+    pipeline: SmartPipelineService = Depends(get_smart_pipeline_service),
+) -> dict[str, object]:
+    return _handle(lambda: pipeline.delete_cube_entries(entry_ids=payload.entry_ids))
 
 
 @router.delete("/pipeline/cube/{entry_id}")

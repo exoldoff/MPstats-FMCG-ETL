@@ -507,6 +507,7 @@ export function App() {
   const [fileKindFilter, setFileKindFilter] = useState<FileKindFilter>("all");
   const [cube, setCube] = useState<CubeItem[]>([]);
   const [cubeTotal, setCubeTotal] = useState(0);
+  const [selectedCubeIds, setSelectedCubeIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectQuery, setProjectQuery] = useState("");
   const [qualityProjects, setQualityProjects] = useState<QualityProject[]>([]);
@@ -614,6 +615,15 @@ export function App() {
     void refreshFilesAndCube();
     void loadDbPreview().catch((exc) => setError(`Предпросмотр БД: ${errorText(exc)}`));
   }, [tab]);
+
+  useEffect(() => {
+    setSelectedCubeIds((current) => {
+      if (!current.size) return current;
+      const availableIds = new Set(cube.map((item) => item.id));
+      const next = new Set([...current].filter((id) => availableIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [cube]);
 
   useEffect(() => {
     if (tab !== "export") return;
@@ -853,6 +863,13 @@ export function App() {
   async function deleteCubeItem(item: CubeItem) {
     setProducts(null);
     return api.deleteCubeEntry(item.id);
+  }
+
+  async function deleteSelectedCubeItems(entryIds: string[]) {
+    setProducts(null);
+    const response = await api.deleteCubeEntries(entryIds);
+    setSelectedCubeIds(new Set());
+    return response;
   }
 
   async function loadDbPreview() {
@@ -2253,7 +2270,10 @@ export function App() {
                 <CubeTable
                   items={cube}
                   busy={Boolean(busy)}
+                  selectedIds={selectedCubeIds}
+                  onSelectionChange={setSelectedCubeIds}
                   onDelete={(item) => void runAction("Удаление среза куба", () => deleteCubeItem(item))}
+                  onBulkDelete={(entryIds) => void runAction("Массовое удаление срезов куба", () => deleteSelectedCubeItems(entryIds))}
                 />
               ) : <Empty text="После сохранения задач здесь появится registry куба." />}
               {products ? (
@@ -4328,7 +4348,29 @@ function ClassifierRulesEditor(props: {
   );
 }
 
-function CubeTable(props: { items: CubeItem[]; busy: boolean; onDelete: (item: CubeItem) => void }) {
+function CubeTable(props: {
+  items: CubeItem[];
+  busy: boolean;
+  selectedIds: Set<string>;
+  onSelectionChange: (ids: Set<string>) => void;
+  onDelete: (item: CubeItem) => void;
+  onBulkDelete: (entryIds: string[]) => void;
+}) {
+  const selectedItems = props.items.filter((item) => props.selectedIds.has(item.id));
+  const allSelected = props.items.length > 0 && selectedItems.length === props.items.length;
+  const selectedRows = selectedItems.reduce((total, item) => total + Number(item.rows_count || 0), 0);
+
+  function toggleItem(item: CubeItem) {
+    const next = new Set(props.selectedIds);
+    if (next.has(item.id)) next.delete(item.id);
+    else next.add(item.id);
+    props.onSelectionChange(next);
+  }
+
+  function toggleAll() {
+    props.onSelectionChange(allSelected ? new Set() : new Set(props.items.map((item) => item.id)));
+  }
+
   function confirmDelete(item: CubeItem) {
     const label = `${monthLabel(item.year, item.month)} · ${item.marketplace} · ${item.category_name}`;
     if (window.confirm(`Удалить срез куба «${label}» и строки БД? Исходные файлы останутся на диске.`)) {
@@ -4336,72 +4378,108 @@ function CubeTable(props: { items: CubeItem[]; busy: boolean; onDelete: (item: C
     }
   }
 
+  function confirmBulkDelete() {
+    if (!selectedItems.length) return;
+    const rowsText = selectedRows ? `, ${formatNumber(selectedRows)} строк товаров` : "";
+    if (window.confirm(`Удалить выбранные срезы куба: ${selectedItems.length}${rowsText}? Исходные файлы останутся на диске.`)) {
+      props.onBulkDelete(selectedItems.map((item) => item.id));
+    }
+  }
+
   return (
-    <FilterableTable
-      rows={props.items}
-      rowKey={(item) => item.id}
-      emptyText="Нет срезов куба по текущим фильтрам."
-      columns={[
-        {
-          id: "actions",
-          label: "",
-          value: () => "",
-          render: (item) => (
-            <button className="icon-button danger-inline" disabled={props.busy} title="Удалить срез куба" onClick={() => confirmDelete(item)}>
-              <Trash2 size={16} />
-            </button>
-          ),
-          className: "row-action-col",
-          filterable: false,
-          sortable: false
-        },
-        { id: "month", label: "Месяц", value: (item) => monthLabel(item.year, item.month) },
-        { id: "marketplace", label: "Marketplace", value: (item) => item.marketplace },
-        { id: "category", label: "Категория", value: (item) => item.category_name },
-        {
-          id: "source_type",
-          label: "Тип загрузки",
-          value: (item) => sourceTypeLabel(item.source_type),
-          render: (item) => <span className={`source-claim ${normalizeSourceType(item.source_type)}`}>{sourceTypeLabel(item.source_type)}</span>
-        },
-        { id: "rows", label: "Строк", value: (item) => item.rows_count, numeric: true },
-        {
-          id: "mode",
-          label: "Режим",
-          value: (item) => item.is_heavy ? "heavy" : "standard",
-          render: (item) => item.is_heavy ? <Badge value="heavy" /> : <span className="muted-cell">standard</span>,
-          title: (item) => item.heavy_reason ?? "Обычный срез."
-        },
-        {
-          id: "reports",
-          label: "Отчёты",
-          value: (item) => item.reports_built_at ?? "",
-          render: (item) => item.reports_built_at ? formatDateTime(item.reports_built_at) : item.is_heavy ? "доступны" : "-",
-          title: (item) => item.reports_built_at ? `Последний отчёт: ${formatDateTime(item.reports_built_at)}` : "Отчёт можно построить во вкладке Данные -> Отчёты."
-        },
-        {
-          id: "days",
-          label: "Дней",
-          value: (item) => item.days_loaded ?? 0,
-          render: cubeDaysLabel,
-          title: (item) => item.data_actual_until ? `Данные актуальны по ${formatDate(item.data_actual_until)}` : "Покрытие по дням пока не сохранено.",
-          numeric: true
-        },
-        {
-          id: "exported",
-          label: "Выгружено",
-          value: (item) => item.exported_at ?? "",
-          render: (item) => item.exported_at ? formatDateTime(item.exported_at) : "-",
-          title: (item) => item.exported_at ? `Дата выгрузки: ${formatDateTime(item.exported_at)}` : "Дата выгрузки не сохранена."
-        },
-        {
-          id: "source",
-          label: "Источник",
-          value: (item) => item.source_processed_file_path ?? "-",
-          title: (item) => item.source_processed_file_path ?? "-"
-        }
-      ]}
-    />
+    <>
+      <div className="bulk-action-bar">
+        <button className="tiny-button" disabled={props.busy || !props.items.length} onClick={toggleAll}>
+          {allSelected ? "Снять выбор" : "Выбрать все"}
+        </button>
+        <span>{selectedItems.length ? `Выбрано ${selectedItems.length} срезов · ${formatNumber(selectedRows)} строк` : "Выберите срезы для массового удаления"}</span>
+        <button className="danger-button" disabled={props.busy || !selectedItems.length} onClick={confirmBulkDelete}>
+          <Trash2 size={16} />Удалить выбранные
+        </button>
+      </div>
+      <FilterableTable
+        rows={props.items}
+        rowKey={(item) => item.id}
+        emptyText="Нет срезов куба по текущим фильтрам."
+        columns={[
+          {
+            id: "select",
+            label: "",
+            value: (item) => props.selectedIds.has(item.id) ? "1" : "0",
+            render: (item) => (
+              <input
+                type="checkbox"
+                checked={props.selectedIds.has(item.id)}
+                disabled={props.busy}
+                title="Выбрать срез"
+                onChange={() => toggleItem(item)}
+              />
+            ),
+            className: "row-action-col",
+            filterable: false,
+            sortable: false
+          },
+          {
+            id: "actions",
+            label: "",
+            value: () => "",
+            render: (item) => (
+              <button className="icon-button danger-inline" disabled={props.busy} title="Удалить срез куба" onClick={() => confirmDelete(item)}>
+                <Trash2 size={16} />
+              </button>
+            ),
+            className: "row-action-col",
+            filterable: false,
+            sortable: false
+          },
+          { id: "month", label: "Месяц", value: (item) => monthLabel(item.year, item.month) },
+          { id: "marketplace", label: "Marketplace", value: (item) => item.marketplace },
+          { id: "category", label: "Категория", value: (item) => item.category_name },
+          {
+            id: "source_type",
+            label: "Тип загрузки",
+            value: (item) => sourceTypeLabel(item.source_type),
+            render: (item) => <span className={`source-claim ${normalizeSourceType(item.source_type)}`}>{sourceTypeLabel(item.source_type)}</span>
+          },
+          { id: "rows", label: "Строк", value: (item) => item.rows_count, numeric: true },
+          {
+            id: "mode",
+            label: "Режим",
+            value: (item) => item.is_heavy ? "heavy" : "standard",
+            render: (item) => item.is_heavy ? <Badge value="heavy" /> : <span className="muted-cell">standard</span>,
+            title: (item) => item.heavy_reason ?? "Обычный срез."
+          },
+          {
+            id: "reports",
+            label: "Отчёты",
+            value: (item) => item.reports_built_at ?? "",
+            render: (item) => item.reports_built_at ? formatDateTime(item.reports_built_at) : item.is_heavy ? "доступны" : "-",
+            title: (item) => item.reports_built_at ? `Последний отчёт: ${formatDateTime(item.reports_built_at)}` : "Отчёт можно построить во вкладке Данные -> Отчёты."
+          },
+          {
+            id: "days",
+            label: "Дней",
+            value: (item) => item.days_loaded ?? 0,
+            render: cubeDaysLabel,
+            title: (item) => item.data_actual_until ? `Данные актуальны по ${formatDate(item.data_actual_until)}` : "Покрытие по дням пока не сохранено.",
+            numeric: true
+          },
+          {
+            id: "exported",
+            label: "Выгружено",
+            value: (item) => item.exported_at ?? "",
+            render: (item) => item.exported_at ? formatDateTime(item.exported_at) : "-",
+            title: (item) => item.exported_at ? `Дата выгрузки: ${formatDateTime(item.exported_at)}` : "Дата выгрузки не сохранена."
+          },
+          {
+            id: "source",
+            label: "Источник",
+            value: (item) => item.source_processed_file_path ?? "-",
+            title: (item) => item.source_processed_file_path ?? "-"
+          }
+        ]}
+      />
+    </>
   );
 }
 
