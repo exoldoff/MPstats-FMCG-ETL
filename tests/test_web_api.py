@@ -1926,6 +1926,71 @@ class WebApiTest(unittest.TestCase):
                 self.assertEqual(len(ready_only.json()["tasks"]), 1)
                 self.assertEqual(ready_only.json()["tasks"][0]["recommended_action"], "Собрать куб из готовых файлов")
 
+    def test_smart_plan_batches_cube_lookup_and_skips_saved_file_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seed_project(root)
+            settings = make_settings(root)
+            app = create_app(settings, start_workers=False)
+
+            with TestClient(app) as client:
+                category_id = client.get("/api/workflow/categories").json()["categories"][0]["category_id"]
+                plan_response = client.post(
+                    "/api/workflow/pipeline/plans",
+                    json={
+                        "project_name": "smart-plan-unit",
+                        "run_type": "historical_backfill",
+                        "category_ids": [category_id],
+                        "start_year": 2025,
+                        "start_month": 1,
+                        "end_year": 2025,
+                        "end_month": 1,
+                        "settings": {
+                            "overwrite_raw": False,
+                            "overwrite_processed": False,
+                            "overwrite_db": False,
+                            "max_parallel_downloads": 1,
+                            "retry_count": 0,
+                            "timeout_seconds": 300,
+                            "pause_between_requests": 0,
+                            "max_weight_kg": 40,
+                        },
+                    },
+                )
+                self.assertEqual(plan_response.status_code, 200)
+                run_id = plan_response.json()["id"]
+                task = client.get(f"/api/workflow/pipeline/runs/{run_id}/tasks").json()["tasks"][0]
+                classified_path = write_semicolon_csv(pd.DataFrame([{"SKU": "ready"}]), Path(task["classified_file_path"]))
+                old_time = 1_700_000_000
+                os.utime(classified_path, (old_time, old_time))
+                app.state.repository.upsert_cube_entry(
+                    {
+                        "project_name": task["project_name"],
+                        "year": task["year"],
+                        "month": task["month"],
+                        "marketplace": task["marketplace"],
+                        "marketplace_code": task["marketplace_code"],
+                        "category_key": task["category_key"],
+                        "category_name": task["category_name"],
+                        "rows_count": 1,
+                        "source_processed_file_path": str(classified_path),
+                        "file_hash": "not-the-current-file-hash",
+                    }
+                )
+
+                with (
+                    patch.object(app.state.repository, "get_cube_entry", side_effect=AssertionError("smart-plan must batch cube lookups")),
+                    patch.object(app.state.smart_plan_service, "_file_sha1", side_effect=AssertionError("saved file hash should not be recalculated")),
+                ):
+                    smart_plan = client.get(f"/api/workflow/pipeline/runs/{run_id}/smart-plan")
+
+                self.assertEqual(smart_plan.status_code, 200)
+                payload = smart_plan.json()
+                self.assertEqual(payload["summary"]["ready"], 1)
+                self.assertEqual(payload["summary"]["saved_to_db"], 1)
+                self.assertTrue(payload["tasks"][0]["has_cube"])
+                self.assertEqual(payload["tasks"][0]["smart_status"], "ready")
+
     def test_smart_pipeline_plan_rebuild_dedup_retry_and_monthly_sync(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

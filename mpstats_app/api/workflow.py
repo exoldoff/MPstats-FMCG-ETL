@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from mpstats_app.api.dependencies import (
     get_catalog_service,
@@ -141,13 +142,14 @@ async def classify_upload(
     workflow: WorkflowService = Depends(get_workflow_service),
 ) -> dict[str, object]:
     content = await request.body()
-    return _handle(
+    return await run_in_threadpool(
+        _handle,
         lambda: workflow.classify_uploaded_file(
             project_name=project_name,
             filename=filename,
             content=content,
             write_xlsx=write_xlsx,
-        )
+        ),
     )
 
 

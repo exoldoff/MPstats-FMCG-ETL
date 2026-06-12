@@ -21,11 +21,13 @@ class SmartPlanService:
         if status != "all" and status not in SMART_PLAN_STATUSES:
             raise ValueError("Неизвестный фильтр умного плана.")
 
-        run = self.repository.refresh_pipeline_run_counts(run_id) or self.repository.get_pipeline_run(run_id)
+        run = self.repository.get_pipeline_run(run_id)
         if not run:
             raise KeyError(f"Запуск не найден: {run_id}")
 
-        items = [self._inspect_task(task) for task in self.repository.list_download_tasks(run_id=run_id)]
+        tasks = self.repository.list_download_tasks(run_id=run_id)
+        cube_entries = self.repository.list_cube_entries_for_tasks(tasks)
+        items = [self._inspect_task(task, cube_entry=cube_entries.get(self._cube_key(task))) for task in tasks]
         summary = self._summary(items)
         filtered_items = items if status == "all" else [item for item in items if item["smart_status"] == status]
         return {
@@ -36,17 +38,10 @@ class SmartPlanService:
             "tasks": filtered_items,
         }
 
-    def _inspect_task(self, task: dict[str, Any]) -> dict[str, Any]:
+    def _inspect_task(self, task: dict[str, Any], *, cube_entry: dict[str, Any] | None) -> dict[str, Any]:
         raw_file = self._file_state(task.get("raw_file_path"))
         processed_file = self._file_state(task.get("processed_file_path"))
         classified_file = self._file_state(task.get("classified_file_path"))
-        cube_entry = self.repository.get_cube_entry(
-            project_name=str(task["project_name"]),
-            year=int(task["year"]),
-            month=int(task["month"]),
-            marketplace_code=str(task["marketplace_code"]),
-            category_key=str(task["category_key"]),
-        )
 
         status, reason, action = self._task_status(
             task=task,
@@ -150,9 +145,21 @@ class SmartPlanService:
                 return "Classified-файл новее сохранённого среза БД."
             stored_hash = str(cube_entry.get("file_hash") or "")
             path = classified_file.get("path")
+            if saved_at and classified_mtime and classified_mtime <= saved_at:
+                return None
             if stored_hash and path and Path(str(path)).exists() and self._file_sha1(Path(str(path))) != stored_hash:
                 return "Хэш classified-файла отличается от сохранённого в registry."
         return None
+
+    @staticmethod
+    def _cube_key(task: dict[str, Any]) -> tuple[str, int, int, str, str]:
+        return (
+            str(task["project_name"]),
+            int(task["year"]),
+            int(task["month"]),
+            str(task["marketplace_code"]),
+            str(task["category_key"]),
+        )
 
     def _summary(self, items: list[dict[str, Any]]) -> dict[str, int]:
         summary = {status: 0 for status in SMART_PLAN_STATUSES}

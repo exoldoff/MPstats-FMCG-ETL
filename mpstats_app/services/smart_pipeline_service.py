@@ -241,19 +241,17 @@ class SmartPipelineService:
         run = self.repository.get_pipeline_run(run_id)
         if not run:
             raise KeyError(f"Запуск не найден: {run_id}")
-        tasks = self.repository.list_download_tasks(run_id=run_id)
-        months = {(int(task["year"]), int(task["month"])) for task in tasks}
-        categories = {str(task["category_id"]) for task in tasks}
-        total = int(run.get("total_tasks") or len(tasks))
+        task_summary = self.repository.summarize_download_tasks(run_id=run_id)
+        total = int(run.get("total_tasks") or task_summary["total_tasks"])
         completed = int(run.get("completed_tasks") or 0)
         failed = int(run.get("failed_tasks") or 0)
         remaining = max(0, total - completed - failed)
         progress = round((completed / total) * 100, 1) if total else 0.0
         return {
             **run,
-            "tasks_preview": tasks[:20],
-            "category_count": len(categories),
-            "month_count": len(months),
+            "tasks_preview": self.repository.list_download_tasks(run_id=run_id, limit=20),
+            "category_count": task_summary["category_count"],
+            "month_count": task_summary["month_count"],
             "remaining_tasks": remaining,
             "progress": progress,
             "is_active": self._is_thread_active(str(run["id"])),

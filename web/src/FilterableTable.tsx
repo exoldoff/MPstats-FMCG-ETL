@@ -58,17 +58,14 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
   const [sort, setSort] = useState<SortState>(null);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const resizeState = useRef<ResizeState | null>(null);
+  const columnsKey = props.columns
+    .map((column) => `${column.id}:${column.filterable === false ? 0 : 1}:${column.sortable === false ? 0 : 1}:${column.numeric ? 1 : 0}`)
+    .join("|");
 
-  const valueOptions = useMemo(() => {
-    const out: Record<string, string[]> = {};
-    for (const column of props.columns) {
-      if (column.filterable === false) continue;
-      const values = new Set<string>();
-      for (const row of props.rows) values.add(cellText(column.value(row)));
-      out[column.id] = [...values].sort(compareText);
-    }
-    return out;
-  }, [props.columns, props.rows]);
+  const openColumn = props.columns.find((column) => column.id === openColumnId);
+  const openColumnValues = useMemo(() => (
+    openColumn?.filterable === false || !openColumn ? [] : columnValues(openColumn, props.rows)
+  ), [openColumnId, props.rows, columnsKey]);
 
   const visibleRows = useMemo(() => {
     const filtered = props.rows.filter((row) =>
@@ -97,7 +94,7 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
       sort.direction,
       sortedColumn.numeric
     ));
-  }, [filters, props.columns, props.rows, sort]);
+  }, [filters, props.rows, sort, columnsKey]);
 
   const activeFilterCount = Object.values(filters).filter((filterState) => isFilterActive(filterState)).length;
 
@@ -206,7 +203,7 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
 
   function toggleValue(columnId: string, value: string) {
     const current = columnFilter(columnId);
-    const allValues = valueOptions[columnId] ?? [];
+    const allValues = columnId === openColumnId ? openColumnValues : columnValuesForId(props.columns, props.rows, columnId);
     const selected = current.selectedValues ?? allValues;
     const nextSelected = selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value];
     patchFilter(columnId, { selectedValues: nextSelected });
@@ -267,7 +264,7 @@ export function FilterableTable<T>(props: FilterableTableProps<T>) {
                           column={column}
                           filterState={filterState}
                           sort={sort}
-                          values={valueOptions[column.id] ?? []}
+                          values={openColumnValues}
                           onClose={() => setOpenColumnId(null)}
                           onSort={setColumnSort}
                           onTextChange={setColumnText}
@@ -378,6 +375,18 @@ function ColumnFilterMenu<T>(props: {
       ) : null}
     </div>
   );
+}
+
+function columnValues<T>(column: FilterableColumn<T>, rows: T[]) {
+  const values = new Set<string>();
+  for (const row of rows) values.add(cellText(column.value(row)));
+  return [...values].sort(compareText);
+}
+
+function columnValuesForId<T>(columns: FilterableColumn<T>[], rows: T[], columnId: string) {
+  const column = columns.find((item) => item.id === columnId);
+  if (!column || column.filterable === false) return [];
+  return columnValues(column, rows);
 }
 
 function columnFilterFrom(filters: Record<string, ColumnFilterState>, columnId: string): ColumnFilterState {

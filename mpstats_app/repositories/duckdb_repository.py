@@ -74,6 +74,8 @@ CSV_DECIMAL_COMMA_PROTECTED_COLUMNS = {
     "подкатегория",
     "тип",
 }
+CSV_DECIMAL_DOT_PATTERN = r"([0-9])\.([0-9])"
+CSV_DECIMAL_COMMA_REPLACEMENT = r"\1,\2"
 
 
 class DuplicateCubeSliceError(ValueError):
@@ -611,7 +613,7 @@ def _csv_decimal_comma_expr(column: str) -> str:
     return (
         "CASE "
         f"WHEN {quoted} IS NULL THEN NULL "
-        f"ELSE regexp_replace(CAST({quoted} AS VARCHAR), {sql_literal(r'([0-9])\.([0-9])')}, {sql_literal(r'\1,\2')}, 'g') "
+        f"ELSE regexp_replace(CAST({quoted} AS VARCHAR), {sql_literal(CSV_DECIMAL_DOT_PATTERN)}, {sql_literal(CSV_DECIMAL_COMMA_REPLACEMENT)}, 'g') "
         f"END AS {quoted}"
     )
 
@@ -1353,7 +1355,7 @@ class DuckDbAppRepository:
     def get_download_task(self, task_id: str) -> dict[str, Any] | None:
         return self._fetch_one("SELECT * FROM download_tasks WHERE id = ?", [task_id])
 
-    def list_download_tasks(self, *, run_id: str, task_filter: str = "all") -> list[dict[str, Any]]:
+    def list_download_tasks(self, *, run_id: str, task_filter: str = "all", limit: int | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM download_tasks WHERE run_id = ?"
         params: list[Any] = [run_id]
         if task_filter == "errors":
@@ -1367,7 +1369,28 @@ class DuckDbAppRepository:
         elif task_filter == "ready":
             query += " AND status IN ('processed', 'classified', 'saved_to_db')"
         query += " ORDER BY year, month, category_name, marketplace"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
         return self._fetch_records(query, params)
+
+    def summarize_download_tasks(self, *, run_id: str) -> dict[str, int]:
+        row = self._fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total_tasks,
+                COUNT(DISTINCT category_id) AS category_count,
+                COUNT(DISTINCT CAST(year AS VARCHAR) || '-' || CAST(month AS VARCHAR)) AS month_count
+            FROM download_tasks
+            WHERE run_id = ?
+            """,
+            [run_id],
+        )
+        return {
+            "total_tasks": int(row["total_tasks"] or 0) if row else 0,
+            "category_count": int(row["category_count"] or 0) if row else 0,
+            "month_count": int(row["month_count"] or 0) if row else 0,
+        }
 
     def list_project_download_tasks(self, *, project_name: str, limit: int = 500) -> list[dict[str, Any]]:
         return self._fetch_records(
@@ -1446,6 +1469,46 @@ class DuckDbAppRepository:
             """,
             [project_name, int(year), int(month), marketplace_code, category_key],
         )
+
+    def list_cube_entries_for_tasks(self, tasks: list[dict[str, Any]]) -> dict[tuple[str, int, int, str, str], dict[str, Any]]:
+        keys = {
+            (
+                str(task["project_name"]),
+                int(task["year"]),
+                int(task["month"]),
+                str(task["marketplace_code"]),
+                str(task["category_key"]),
+            )
+            for task in tasks
+        }
+        if not keys:
+            return {}
+
+        projects = sorted({key[0] for key in keys})
+        category_keys = sorted({key[4] for key in keys})
+        project_placeholders = ", ".join("?" for _ in projects)
+        category_placeholders = ", ".join("?" for _ in category_keys)
+        rows = self._fetch_records(
+            f"""
+            SELECT *
+            FROM cube_registry
+            WHERE project_name IN ({project_placeholders})
+              AND category_key IN ({category_placeholders})
+            """,
+            [*projects, *category_keys],
+        )
+        out: dict[tuple[str, int, int, str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (
+                str(row["project_name"]),
+                int(row["year"]),
+                int(row["month"]),
+                str(row["marketplace_code"]),
+                str(row["category_key"]),
+            )
+            if key in keys:
+                out[key] = row
+        return out
 
     def get_cube_entry_by_natural_key(
         self,
