@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -552,6 +553,8 @@ class PipelineServicesTest(unittest.TestCase):
             self.assertEqual(result.iloc[0]["Подкатегория"], "Мясо")
             self.assertEqual(result.iloc[1]["Подкатегория"], "Прочее")
             self.assertEqual(result.iloc[0]["Тип"], "Прочие")
+            self.assertIn("timings", step.details[0])
+            self.assertIn("apply_rules_seconds", step.details[0]["timings"])
             saved = read_semicolon_csv(output_file)
             self.assertIn("месяц", saved.columns)
             self.assertEqual(saved["месяц"].tolist(), ["янв.", "янв."])
@@ -615,6 +618,42 @@ class PipelineServicesTest(unittest.TestCase):
 
             self.assertEqual(int(report.iloc[0]["applied_rows"]), 1)
             self.assertEqual(result["Подкатегория"].fillna("").tolist(), ["Literal", ""])
+
+    def test_classifier_rules_cache_invalidates_when_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rules_file = root / "rules.csv"
+            header = "active;priority;category;target_column;match_field;match_type;pattern;set_value;mode;comment;conditions_json"
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        header,
+                        "1;1;*;Подкатегория;Название;contains;бел;Белое;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            frame = pd.DataFrame([{"Категория": "Мыло", "Название": "белое мыло"}])
+
+            first, _ = apply_classifiers(frame, rules_file)
+            self.assertEqual(first["Подкатегория"].tolist(), ["Белое"])
+
+            rules_file.write_text(
+                "\n".join(
+                    [
+                        header,
+                        "1;1;*;Подкатегория;Название;contains;бел;Светлое;fill_empty;;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stat = rules_file.stat()
+            os.utime(rules_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+            second, _ = apply_classifiers(frame, rules_file)
+            self.assertEqual(second["Подкатегория"].tolist(), ["Светлое"])
 
     def test_numeric_classifier_rules_compare_weight_kg(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

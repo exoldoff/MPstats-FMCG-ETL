@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import importlib
+import time
+from typing import Callable, TypeVar
 
 import pandas as pd
 
@@ -27,6 +28,16 @@ MONTH_LABELS = {
     11: "ноя.",
     12: "дек.",
 }
+
+T = TypeVar("T")
+
+
+def _time_call(timings: dict[str, float], key: str, callback: Callable[[], T]) -> T:
+    started = time.perf_counter()
+    try:
+        return callback()
+    finally:
+        timings[key] = timings.get(key, 0.0) + (time.perf_counter() - started)
 
 
 def read_classification_input(input_file: str | Path) -> pd.DataFrame:
@@ -84,16 +95,27 @@ def classify_dataframe(
     fill_unclassified: dict[str, object] | None = None,
     manual_overrides_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    importlib.reload(classifier_engine)
-    result, report = classifier_engine.apply_classifiers(
-        prepare_for_classification(df),
-        rules_path=rules_path,
-        fill_unclassified=fill_unclassified,
+    timings: dict[str, float] = {}
+    prepared = _time_call(timings, "prepare_input_seconds", lambda: prepare_for_classification(df))
+    result, report = _time_call(
+        timings,
+        "apply_rules_seconds",
+        lambda: classifier_engine.apply_classifiers(
+            prepared,
+            rules_path=rules_path,
+            fill_unclassified=fill_unclassified,
+        ),
     )
-    result, dropped_columns, rename_map = postprocess_classified(result)
+    result, dropped_columns, rename_map = _time_call(timings, "postprocess_seconds", lambda: postprocess_classified(result))
     manual_report = pd.DataFrame()
     if manual_overrides_path is not None:
-        result, manual_report = apply_manual_overrides(result, overrides_path=manual_overrides_path)
+        result, manual_report = _time_call(
+            timings,
+            "manual_overrides_seconds",
+            lambda: apply_manual_overrides(result, overrides_path=manual_overrides_path),
+        )
+    else:
+        timings["manual_overrides_seconds"] = 0.0
     active_report = report[report["active"] == True].copy() if "active" in report.columns else report.copy()
     updated_rows = int(active_report["applied_rows"].sum()) if "applied_rows" in active_report.columns else 0
     manual_updated_rows = int(manual_report["applied_rows"].sum()) if "applied_rows" in manual_report.columns else 0
@@ -104,6 +126,7 @@ def classify_dataframe(
         "manual_updated_rows": manual_updated_rows,
         "dropped_columns": dropped_columns,
         "renamed_columns": rename_map,
+        "timings": timings,
     }
     return result, report, meta
 
@@ -117,20 +140,36 @@ def classify_file(
     fill_unclassified: dict[str, object] | None = None,
     manual_overrides_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, StepResult]:
-    df = read_classification_input(input_file)
+    total_started = time.perf_counter()
+    timings: dict[str, float] = {}
+    df = _time_call(timings, "read_input_seconds", lambda: read_classification_input(input_file))
     result_df, report, meta = classify_dataframe(
         df,
         rules_path=rules_path,
         fill_unclassified=fill_unclassified,
         manual_overrides_path=manual_overrides_path,
     )
-    out_path = write_semicolon_csv(result_df, output_file)
+    timings.update(meta.pop("timings", {}))
+    out_path = _time_call(timings, "write_output_seconds", lambda: write_semicolon_csv(result_df, output_file))
     if write_xlsx:
         try:
-            result_df.to_excel(out_path.with_suffix(".xlsx"), index=False)
+            _time_call(
+                timings,
+                "write_xlsx_seconds",
+                lambda: result_df.to_excel(out_path.with_suffix(".xlsx"), index=False),
+            )
         except ImportError as exc:
             raise ImportError("Для сохранения XLSX нужен openpyxl. Установи зависимости проекта: pip install -r requirements.txt") from exc
+    else:
+        timings["write_xlsx_seconds"] = 0.0
+    timings["total_seconds"] = time.perf_counter() - total_started
 
     step = StepResult(name="step6_classify", ok=1, rows=len(result_df), output=out_path)
-    step.add_detail(input=str(input_file), output=str(out_path), report_rows=len(report), **meta)
+    step.add_detail(
+        input=str(input_file),
+        output=str(out_path),
+        report_rows=len(report),
+        timings={key: round(value, 4) for key, value in timings.items()},
+        **meta,
+    )
     return result_df, report, step

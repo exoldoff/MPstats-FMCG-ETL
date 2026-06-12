@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -60,6 +61,23 @@ def load_rules(rules_path: str | Path) -> pd.DataFrame:
     if path.suffix.lower() in {".xlsx", ".xls"}:
         return pd.read_excel(path, dtype=str).fillna("")
     raise ValueError(f"Unsupported rules format: {path.suffix}. Use .csv/.xlsx/.xls")
+
+
+def _rules_file_signature(rules_path: str | Path) -> tuple[str, int, int]:
+    path = Path(rules_path)
+    stat = path.stat()
+    return str(path.resolve()), stat.st_mtime_ns, stat.st_size
+
+
+@lru_cache(maxsize=16)
+def _load_prepared_rules_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    del mtime_ns, size
+    return _validate_and_prepare_rules(load_rules(path))
+
+
+def load_prepared_rules(rules_path: str | Path) -> pd.DataFrame:
+    path, mtime_ns, size = _rules_file_signature(rules_path)
+    return _load_prepared_rules_cached(path, mtime_ns, size)
 
 
 def _to_bool(value: object) -> bool:
@@ -432,7 +450,7 @@ def apply_classifiers(
         rules_path = default_rules_path()
 
     out = df.copy()
-    rules = _validate_and_prepare_rules(load_rules(rules_path))
+    rules = load_prepared_rules(rules_path)
     fill_unclassified_map = _normalize_fill_unclassified(fill_unclassified)
     report_rows: list[dict[str, object]] = []
 
